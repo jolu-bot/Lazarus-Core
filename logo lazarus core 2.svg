@@ -1,0 +1,25 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00AEEF"></stop>
+      <stop offset="100%" stop-color="#001F3F"></stop>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="512" height="512" fill="#0B0B0B"></rect>
+
+  <!-- Outer Ring -->
+  <circle cx="256" cy="256" r="180" stroke="#C0C0C0" stroke-width="2" fill="none" opacity="0.4"></circle>
+
+  <!-- Core Glow -->
+  <circle cx="256" cy="256" r="80" fill="url(#glow)"></circle>
+
+  <!-- Phoenix abstract -->
+  <path d="M256 200 Q300 260 256 320 Q212 260 256 200" fill="#00AEEF" opacity="0.8"></path>
+
+  <!-- Text -->
+  <text x="50%" y="460" text-anchor="middle" fill="#FFFFFF" font-size="28" font-family="Arial" letter-spacing="2">
+    LAZARUS CORE
+  </text>
+</svg>

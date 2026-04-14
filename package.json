@@ -1,0 +1,18 @@
+﻿{
+  "name":    "lazarus-core-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "install:all":    "npm run install:app && npm run install:renderer",
+    "install:app":    "cd app && npm install",
+    "install:renderer": "cd app/renderer && npm install",
+    "dev":            "cd app && npm run dev",
+    "build":          "cd app && npm run build",
+    "build:win":      "cd app && npm run build:win",
+    "build:mac":      "cd app && npm run build:mac",
+    "build:native":   "cd core && node-gyp rebuild",
+    "install:ai":     "cd ai && pip install -r requirements.txt",
+    "start:ai":       "cd ai && python server.py",
+    "clean":          "node scripts/clean.js"
+  }
+}
