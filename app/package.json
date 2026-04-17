@@ -1,7 +1,7 @@
 {
   "name": "lazarus-core",
   "version": "1.0.0",
-  "description": "Lazarus Core \u2013 Recover the Impossible",
+  "description": "Lazarus Core â€“ Recover the Impossible",
   "main": "main/index.js",
   "homepage": "./",
   "author": {
@@ -19,25 +19,25 @@
     "rebuild:native": "cd ../core && node-gyp rebuild"
   },
   "dependencies": {
-    "electron-updater": "^6.1.8",
-    "electron-store": "^8.2.0",
-    "node-machine-id": "^1.1.12",
     "axios": "^1.7.2",
+    "electron-store": "^8.2.0",
+    "electron-updater": "^6.1.8",
     "form-data": "^4.0.0",
     "node-addon-api": "^8.1.0",
+    "node-machine-id": "^1.1.12",
     "stripe": "^15.12.0",
     "uuid": "^10.0.0"
   },
   "devDependencies": {
-    "electron": "^31.0.0",
-    "electron-builder": "^24.13.3",
     "concurrently": "^8.2.2",
+    "electron": "^35.0.0",
+    "electron-builder": "^26.8.1",
     "wait-on": "^7.2.0"
   },
   "build": {
     "appId": "com.lazaruscore.app",
     "productName": "Lazarus Core",
-    "copyright": "Copyright \u00a9 2025 Lazarus Core",
+    "copyright": "Copyright Â© 2025 Lazarus Core",
     "icon": "assets/icons/icon",
     "asar": true,
     "asarUnpack": [
