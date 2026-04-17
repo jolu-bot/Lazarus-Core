@@ -1,4 +1,5 @@
 'use strict';
+const axios = require('axios');
 const crypto        = require('crypto');
 const { machineId } = require('node-machine-id');
 
@@ -73,8 +74,23 @@ function setupLicenseIPC(ipcMain, store) {
   });
 
   ipcMain.handle('license:activate', async (_, { key, email }) => {
-    // In production: POST to license server for validation
-    // Here: basic HMAC format check
+    // Try online server first, fall back to local HMAC check
+    const SERVER = process.env.LAZARUS_LICENSE_SERVER || null;
+    if (SERVER) {
+      try {
+        const mid = await machineId();
+        const midHash = crypto.createHash('sha256').update(mid).digest('hex').substring(0, 16);
+        const resp = await axios.post(SERVER + '/activate', { key, machine_hash: midHash, email }, { timeout: 8000 });
+        if (resp.data.success) {
+          store.set('license', { key, email, plan: resp.data.plan, machineHash: midHash, activatedAt: Date.now() });
+          return { success: true, plan: resp.data.plan, features: PLAN_FEATURES[resp.data.plan] };
+        }
+        return { success: false, message: resp.data.error || 'Server rejected key' };
+      } catch (netErr) {
+        console.warn('License server unreachable, falling back to local validation:', netErr.message);
+      }
+    }
+    // Offline fallback: basic HMAC format check
     if (!key || !key.startsWith('LZR')) {
       return { success: false, message: 'Invalid key format' };
     }

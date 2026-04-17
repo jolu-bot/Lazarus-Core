@@ -30,7 +30,13 @@ async function startAIServer() {
     return;
   }
 
-  const pythonBin = process.platform === 'win32' ? 'python' : 'python3';
+  // Prefer .venv312 (Python 3.12 + PyTorch), fall back to system python
+  const venv312 = process.platform === 'win32'
+    ? require('path').join(__dirname, '../../.venv312/Scripts/python.exe')
+    : require('path').join(__dirname, '../../.venv312/bin/python');
+  const venvExists = require('fs').existsSync(venv312);
+  const pythonBin = venvExists ? venv312 : (process.platform === 'win32' ? 'python' : 'python3');
+  console.log('[AI] Using python:', venvExists ? '.venv312' : 'system');
   const env = {
     ...process.env,
     LAZARUS_AI_PORT:     AI_PORT,
