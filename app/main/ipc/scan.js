@@ -176,7 +176,7 @@ function simulateScan(event) {
     const status = statuses[count % statuses.length];
     const conf   = parseFloat((0.45 + Math.random() * 0.55).toFixed(2));
     const file   = {
-      id: count, name: ile_.,
+      id:count, name:'file_'+count+'.'+ext,
       extension: ext, size: Math.floor(Math.random()*80_000_000)+5_000,
       type: typeMap[ext] ?? 6, status, confidence: conf, recoverable:true,
       path:'', fs: 1, mft_ref: 0x1000 + count,
@@ -187,7 +187,7 @@ function simulateScan(event) {
       percent: Math.round((count/312)*100), finished:false,
       filesFound:count+1, filesRecoverable:count+1,
       sectorsTotal:1000000, sectorsScanned:Math.round((count/312)*1000000),
-      currentPath: Scanning cluster ...
+      currentPath:'Scanning cluster '+count+'...'
     });
     count++;
   }, 40);
