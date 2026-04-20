@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, Tray, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, Tray, nativeImage, Notification } = require('electron');
 const path    = require('path');
 const os      = require('os');
 const fs      = require('fs');
@@ -143,3 +143,12 @@ ipcMain.handle('shell:openPath', async (_, p) => {
 
 ipcMain.handle('app:getVersion', () => app.getVersion());
 ipcMain.handle('app:getPlatform', () => process.platform);
+
+ipcMain.handle('app:getSettings', () => store.get('settings', { threads:0, bufferMB:4, outputDir:'' }));
+ipcMain.handle('app:setSettings', (_, s) => { store.set('settings', s); return true; });
+ipcMain.on('app:scan-done', (_, data) => {
+  try {
+    if (Notification.isSupported())
+      new Notification({ title:'Lazarus Core', body:'Scan complete - ' + (data.filesFound||0) + ' files found' }).show();
+  } catch(e) {}
+});

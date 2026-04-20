@@ -5,6 +5,7 @@ import TitleBar          from './components/ui/TitleBar';
 import Sidebar           from './components/ui/Sidebar';
 import ScanView          from './components/panels/ScanView';
 import SettingsView      from './components/panels/SettingsView';
+import ToastContainer    from './components/ui/Toast';
 
 const lzr = window.lazarus;
 
@@ -30,6 +31,7 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen bg-bg overflow-hidden">
       <TitleBar />
+      <ToastContainer />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
         <AnimatePresence mode="wait">

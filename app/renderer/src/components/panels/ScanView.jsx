@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Play, StopCircle, HardDrive, ChevronDown, Settings2, RefreshCw, Usb } from 'lucide-react';
+import { Play, StopCircle, HardDrive, ChevronDown, Settings2, RefreshCw, Usb, Folder } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
 import FileList        from './FileList';
 import PreviewPanel    from './PreviewPanel';
@@ -14,12 +14,13 @@ export default function ScanView() {
     drives, selectedDrive, scanState, progress, scanOptions,
     setDrives, selectDrive, setScanState, setProgress,
     addFile, clearFiles, setScanOptions,
+    outputDir, setOutputDir, setScanStartTime, scanStartTime,
     license,
   } = useAppStore();
 
   const [driveOpen,   setDriveOpen]   = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
-  const [outputDir,   setOutputDir]   = useState('');
+
 
   // â”€â”€ Load drives â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
@@ -32,7 +33,7 @@ export default function ScanView() {
   useEffect(() => {
     const offFile = lzr?.on('scan:file-found', (f)   => addFile(f));
     const offProg = lzr?.on('scan:progress',   (p)   => setProgress(p));
-    const offDone = lzr?.on('scan:done',       ()    => setScanState('done'));
+    const offDone = lzr?.on('scan:done', (d) => { setScanState('done'); lzr?.send('app:scan-done', { filesFound: d?.filesFound || 0 }); });
     return () => { offFile?.(); offProg?.(); offDone?.(); };
   }, []);
 
@@ -49,6 +50,7 @@ export default function ScanView() {
     if (!selectedDrive) return;
     clearFiles();
     setScanState('scanning');
+    setScanStartTime(Date.now());
     setProgress({ percent: 0, filesFound: 0, filesRecoverable: 0 });
 
     const dir = outputDir || (await lzr?.invoke('dialog:openFolder').catch(() => null));
@@ -130,6 +132,16 @@ export default function ScanView() {
             )}
           </AnimatePresence>
         </div>
+
+        {/* Output folder pre-select */}
+        <button
+          onClick={async()=>{const d=await lzr?.invoke('dialog:openFolder');if(d)setOutputDir(d);}}
+          title={outputDir||'Choose output folder'}
+          className={'flex items-center gap-1 px-2.5 py-2 rounded-lg border text-xs transition-colors ' + (outputDir ? 'border-primary/40 text-primary bg-primary/5' : 'border-surface-border text-text-dim hover:text-text hover:border-primary/30')}
+        >
+          <Folder size={13}/>
+          <span>{outputDir ? 'Output set' : 'Output'}</span>
+        </button>
 
         {/* Refresh drives */}
         <button onClick={refreshDrives}
@@ -215,6 +227,9 @@ export default function ScanView() {
             percent={progress.percent}
             filesFound={progress.filesFound}
             done={scanState === 'done'}
+            sectorsScanned={progress.sectorsScanned||0}
+            sectorsTotal={progress.sectorsTotal||0}
+            startTime={scanStartTime}
           />
         </div>
       )}

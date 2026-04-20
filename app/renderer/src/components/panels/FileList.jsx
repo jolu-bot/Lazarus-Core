@@ -19,7 +19,7 @@ function fmtSz(n){ if(!n)return'0 B';if(n<1024)return n+' B';if(n<1048576)return
 const FILTERS=[{id:'all',label:'All'},{id:'images',label:'Images'},{id:'videos',label:'Videos'},{id:'audio',label:'Audio'},{id:'documents',label:'Documents'},{id:'archives',label:'Archives'}];
 
 export default function FileList(){
-  const { filteredFiles,selectedFile,selectFile,filter,setFilter }=useAppStore();
+  const { filteredFiles,selectedFile,selectFile,filter,setFilter,addToast }=useAppStore();
   const [selected,setSelected]=useState(new Set());
   const parentRef=useRef(null);
 
@@ -39,7 +39,7 @@ export default function FileList(){
     if(!dir)return;
     let ok=0;
     for(const f of todo){ const r=await window.lazarus?.invoke('scan:recover','',f,dir); if(r?.success)ok++; }
-    alert(`Recovery complete: ${ok}/${todo.length} file(s) saved to\n${dir}`);
+    addToast("Saved: "+ok+"/"+todo.length+" files to "+dir);
     setSelected(new Set());
   };
 
@@ -65,6 +65,11 @@ export default function FileList(){
               filter.statusDeleted?'bg-accent/20 text-accent border border-accent/30':'text-text-dim hover:text-text hover:bg-surface-2')}>
             Deleted
           </button>
+        </div>
+        <div className="flex items-center gap-2 mt-0.5 px-1">
+          <span className="text-xs text-text-dim whitespace-nowrap">Min health</span>
+          <input type="range" min="0" max="100" step="5" value={filter.minHealth||0} onChange={e=>setFilter({minHealth:parseInt(e.target.value)})} className="flex-1 accent-primary cursor-pointer" style={{height:'3px'}}/>
+          <span className="text-xs font-mono text-text-dim w-8 text-right">{filter.minHealth||0}%</span>
         </div>
       </div>
 

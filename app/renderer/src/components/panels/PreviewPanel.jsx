@@ -15,7 +15,7 @@ function hColor(s){ return s>=85?'#22c55e':s>=70?'#eab308':s>=50?'#f97316':'#ef4
 function fmtSz(n){ if(!n)return'0 B';if(n<1024)return n+' B';if(n<1048576)return(n/1024).toFixed(1)+' KB';if(n<1073741824)return(n/1048576).toFixed(1)+' MB';return(n/1073741824).toFixed(2)+' GB'; }
 
 export default function PreviewPanel(){
-  const { selectedFile,aiAvailable,repairResults,setRepairResult,setRepairedImage } = useAppStore();
+  const { selectedFile,aiAvailable,repairResults,setRepairResult,setRepairedImage,addToast } = useAppStore();
   const [zoom,setZoom]               = useState(1);
   const [aiLoading,setAILoading]     = useState(false);
   const [recovering,setRecovering]   = useState(false);
@@ -39,8 +39,8 @@ export default function PreviewPanel(){
     if(!dir){ setRecovering(false); return; }
     const r = await lzr?.invoke('scan:recover','',selectedFile,dir);
     setRecovering(false);
-    if(r?.success) alert(`File recovered to:\n${r.outputPath||dir}`);
-    else alert('Recovery failed: '+(r?.message||'Unknown error'));
+    if(r?.success) addToast('Recovered: '+(r.outputPath||dir));
+    else addToast('Recovery failed: '+(r?.message||'Unknown error'),'error');
   };
 
   const handleRepair = async(mode)=>{

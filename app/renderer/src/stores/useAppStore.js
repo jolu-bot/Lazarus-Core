@@ -64,6 +64,23 @@ export const useAppStore = create(
 
     repairedImage:    null,
     setRepairedImage: (img) => set({ repairedImage: img }),
+
+    // Toasts
+    toasts: [],
+    addToast: (msg, tp) => set((s) => ({ toasts: [...s.toasts, { id: Date.now() + Math.random(), msg, type: tp||"success" }] })),
+    removeToast: (id) => set((s) => ({ toasts: s.toasts.filter((x) => x.id !== id) })),
+
+    // Output dir
+    outputDir: "",
+    setOutputDir: (d) => set({ outputDir: d }),
+
+    // Settings
+    settings: { threads:0, bufferMB:4, outputDir:"" },
+    setSettings: (sv) => set((prev) => ({ settings: { ...prev.settings, ...sv } })),
+
+    // Scan timing
+    scanStartTime: null,
+    setScanStartTime: (ti) => set({ scanStartTime: ti }),
   }))
 );
 
