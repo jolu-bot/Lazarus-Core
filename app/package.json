@@ -19,7 +19,7 @@
     "rebuild:native": "cd ../core && node-gyp rebuild"
   },
   "dependencies": {
-    "axios": "^1.7.2",
+    "axios": "^1.15.1",
     "electron-store": "^8.2.0",
     "electron-updater": "^6.1.8",
     "form-data": "^4.0.0",
