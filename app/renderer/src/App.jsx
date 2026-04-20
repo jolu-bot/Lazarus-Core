@@ -5,12 +5,14 @@ import TitleBar          from './components/ui/TitleBar';
 import Sidebar           from './components/ui/Sidebar';
 import ScanView          from './components/panels/ScanView';
 import SettingsView      from './components/panels/SettingsView';
+import HistoryView       from './components/panels/HistoryView';
 import ToastContainer    from './components/ui/Toast';
 
 const lzr = window.lazarus;
 
 export default function App() {
-  const { view, setLicense, setAIAvailable } = useAppStore();
+  const { view, setLicense, setAIAvailable, theme } = useAppStore();
+  useEffect(() => { document.documentElement.classList.toggle('dark',theme==='dark'); document.documentElement.classList.toggle('light',theme!=='dark'); }, [theme]);
 
   // â”€â”€ Bootstrap â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
@@ -25,7 +27,7 @@ export default function App() {
     }).catch(() => setAIAvailable(false));
   }, []);
 
-  const views = { scan: ScanView, settings: SettingsView };
+  const views = { scan: ScanView, settings: SettingsView, history: HistoryView };
   const ActiveView = views[view] || ScanView;
 
   return (

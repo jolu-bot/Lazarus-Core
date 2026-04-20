@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Save, FolderOpen } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
-const lzr = window.lzr;
+const lzr = window.lazarus;
 export default function SettingsView() {
-  const { settings, setSettings, setOutputDir } = useAppStore();
+  const { settings, setSettings, setOutputDir, theme, setTheme } = useAppStore();
   const [local, setLocal] = useState({ threads:0, bufferMB:4, outputDir:'' });
   const [saved, setSaved] = useState(false);
   useEffect(() => {
@@ -45,7 +45,27 @@ export default function SettingsView() {
             </button>
           </div>
         </Field>
-        <button onClick={save}
+        <Field label="Theme" hint="Switch between dark and light mode">
+          <div className="flex gap-2">
+            {['dark','light'].map((t)=>(
+              <button key={t} onClick={()=>setTheme(t)}
+                className={'flex-1 py-2 rounded-lg border text-sm font-medium transition-all '+
+                  (theme===t?'bg-primary/20 border-primary/50 text-primary':'bg-surface-2 border-border text-text-dim hover:text-text')}>
+                {t.charAt(0).toUpperCase()+t.slice(1)}
+              </button>
+            ))}
+          </div>
+        </Field>        <Field label="Theme" hint="Switch between dark and light mode">
+          <div className="flex gap-2">
+            {['dark','light'].map((t)=>(
+              <button key={t} onClick={()=>setTheme(t)}
+                className={'flex-1 py-2 rounded-lg border text-sm font-medium transition-all '+
+                  (theme===t?'bg-primary/20 border-primary/50 text-primary':'bg-surface-2 border-border text-text-dim hover:text-text')}>
+                {t.charAt(0).toUpperCase()+t.slice(1)}
+              </button>
+            ))}
+          </div>
+        </Field>        <button onClick={save}
           className={'flex items-center justify-center gap-2 px-6 py-2.5 rounded-lg text-sm font-semibold transition-all ' + (saved ? 'bg-accent-green/20 border border-accent-green/40 text-accent-green' : 'bg-primary hover:bg-primary/90 text-black')}>
           <Save size={15} />{saved ? 'Saved!' : 'Save Settings'}
         </button>

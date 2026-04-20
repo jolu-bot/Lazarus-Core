@@ -4,7 +4,7 @@ import { useAppStore }    from '../../stores/useAppStore';
 import {
   Image, Film, Music, FileText, Archive, File,
   Search, CheckCircle2, Circle, Download, AlertTriangle,
-  Wrench, RefreshCcw, ShieldCheck
+  Wrench, RefreshCcw, ShieldCheck, FileDown
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -32,6 +32,11 @@ export default function FileList(){
 
   const toggle=(e,id)=>{ e.stopPropagation(); setSelected(s=>{ const n=new Set(s);n.has(id)?n.delete(id):n.add(id);return n; }); };
 
+  const handleExport=async(fmt)=>{
+    if(!filteredFiles.length){addToast('No files to export','error');return;}
+    const r=await window.lazarus?.invoke('app:export-files',{files:filteredFiles,format:fmt});
+    if(r)addToast('Exported '+filteredFiles.length+' files','success');
+  };
   const handleRecover=async()=>{
     const todo=filteredFiles.filter(f=>selected.has(f.id));
     if(!todo.length)return;
@@ -71,15 +76,28 @@ export default function FileList(){
           <input type="range" min="0" max="100" step="5" value={filter.minHealth||0} onChange={e=>setFilter({minHealth:parseInt(e.target.value)})} className="flex-1 accent-primary cursor-pointer" style={{height:'3px'}}/>
           <span className="text-xs font-mono text-text-dim w-8 text-right">{filter.minHealth||0}%</span>
         </div>
+        <div className="flex items-center gap-2 px-1">
+          <span className="text-xs text-text-dim whitespace-nowrap">Extension</span>
+          <input type="text" placeholder=".jpg .pdf" value={filter.ext||''}
+            onChange={e=>setFilter({ext:e.target.value.replace(/^\.\.*/,'').toLowerCase()})}
+            className="flex-1 bg-surface-2 border border-border rounded-lg px-2 py-0.5 text-xs text-text outline-none focus:border-primary/50"/>
+        </div>
       </div>
 
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-surface-border bg-bg-2 text-xs text-text-dim">
         <span>{filteredFiles.length.toLocaleString()} files found</span>
-        {selected.size>0&&(
-          <button onClick={handleRecover} className="flex items-center gap-1 text-primary hover:text-primary-hover font-medium transition-colors">
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1">
+            <button onClick={()=>handleExport('csv')} className="flex items-center gap-1 text-text-dim hover:text-primary transition-colors"><FileDown size={12}/>CSV</button>
+            <span className="opacity-30">|</span>
+            <button onClick={()=>handleExport('json')} className="flex items-center gap-1 text-text-dim hover:text-primary transition-colors"><FileDown size={12}/>JSON</button>
+          </div>
+          {selected.size>0&&(
+            <button onClick={handleRecover} className="flex items-center gap-1 text-primary hover:text-primary-hover font-medium transition-colors">
             <Download size={12}/> Recover {selected.size}
           </button>
-        )}
+          )}
+        </div>
       </div>
 
       <div ref={parentRef} className="flex-1 overflow-y-auto">

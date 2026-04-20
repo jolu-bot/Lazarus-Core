@@ -63,7 +63,7 @@ function createWindow() {
     if (!isDev) checkForUpdates();
   });
 
-  mainWindow.on('closed', () => { mainWindow = null; });
+  mainWindow.on('close', (e) => { e.preventDefault(); mainWindow?.hide(); });
 
   // Window controls IPC
   ipcMain.on('win:minimize', () => mainWindow?.minimize());
@@ -77,6 +77,8 @@ function createWindow() {
 // â”€â”€â”€ App lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.whenReady().then(async () => {
   createWindow();
+  setupTray();
+  setupTray();
   setupLicenseIPC(ipcMain, store);
   setupScanIPC(ipcMain);
   setupDriveWatcher(mainWindow);
@@ -147,8 +149,44 @@ ipcMain.handle('app:getPlatform', () => process.platform);
 ipcMain.handle('app:getSettings', () => store.get('settings', { threads:0, bufferMB:4, outputDir:'' }));
 ipcMain.handle('app:setSettings', (_, s) => { store.set('settings', s); return true; });
 ipcMain.on('app:scan-done', (_, data) => {
+  const hist=store.get('scanHistory',[]);
+  hist.unshift({id:Date.now(),date:new Date().toISOString(),filesFound:data.filesFound||0,drive:data.drive||''});
+  if(hist.length>50)hist.splice(50);
+  store.set('scanHistory',hist);
+
   try {
     if (Notification.isSupported())
       new Notification({ title:'Lazarus Core', body:'Scan complete - ' + (data.filesFound||0) + ' files found' }).show();
   } catch(e) {}
 });
+
+ipcMain.handle('app:getSettings', () => store.get('settings', { threads:0, bufferMB:4, outputDir:'' }));
+ipcMain.handle('app:setSettings', (_, s) => { store.set('settings', s); return true; });
+ipcMain.on('app:scan-done', (_, data) => {
+  try {
+    if (Notification.isSupported())
+      new Notification({ title:'Lazarus Core', body:'Scan complete - ' + (data.filesFound||0) + ' files found' }).show();
+  } catch(e) {}
+});
+// == ADDITIONS ==
+function setupTray() {
+  const {Tray,nativeImage,Menu,app} = require('electron');
+  let icon;
+  try { icon = nativeImage.createFromPath(require('path').join(__dirname,'../assets/icons/icon.png')).resize({width:16,height:16}); } catch(e){icon=nativeImage.createEmpty();}
+  tray = new Tray(icon);
+  tray.setToolTip('Lazarus Core');
+  tray.setContextMenu(Menu.buildFromTemplate([{label:'Show',click:()=>{mainWindow&&mainWindow.show();}},{label:'Quit',click:()=>{app.quit();}}]));
+  tray.on('double-click',()=>{mainWindow&&mainWindow.show();});
+}
+ipcMain.handle('history:get',()=>store.get('scanHistory',[]));
+ipcMain.handle('history:clear',()=>{store.delete('scanHistory');return true;});
+ipcMain.handle('app:export-files',async(_,data)=>{
+  const files=data.files;const format=data.format;
+  const ext=format==='csv'?'.csv':'.json';
+  const r=await dialog.showSaveDialog(mainWindow,{defaultPath:require('path').join(require('os').homedir(),'lazarus-export'+ext),filters:format==='csv'?[{name:'CSV',extensions:['csv']}]:[{name:'JSON',extensions:['json']}]});
+  if(r.canceled)return null;
+  if(format==='csv'){const h='name,type,size,status,health,path';const rows=files.map(f=>[f.name||'',f.type||0,f.size||0,f.status||0,(f.health&&f.health.score)||0,f.path||''].join(','));require('fs').writeFileSync(r.filePath,[h,...rows].join('\n'),'utf8');}
+  else{require('fs').writeFileSync(r.filePath,JSON.stringify(files,null,2),'utf8');}
+  return r.filePath;
+});
+ipcMain.on('app:tray-toggle',(_,enable)=>{if(enable&&!tray)setupTray();if(!enable&&tray){tray.destroy();tray=null;}});

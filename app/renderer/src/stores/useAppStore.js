@@ -35,7 +35,7 @@ export const useAppStore = create(
     clearFiles: () => set({ files:[], filteredFiles:[] }),
 
     // ── Filter ──────────────────────────────────────────────────
-    filter: { type:'all', search:'', statusDeleted:false, minHealth:0 },
+    filter: { type:'all', search:'', statusDeleted:false, minHealth:0, ext:'', minSize:0, maxSize:0 },
     setFilter: (f) => set((s) => {
       const filter = { ...s.filter, ...f };
       return { filter, filteredFiles: applyFilter(s.files, filter) };
@@ -81,6 +81,42 @@ export const useAppStore = create(
     // Scan timing
     scanStartTime: null,
     setScanStartTime: (ti) => set({ scanStartTime: ti }),
+
+    // Scan history
+    scanHistory: [],
+    loadScanHistory: async () => {
+      const h = await window.lazarus?.invoke('history:get');
+      if (h) set({ scanHistory: h });
+    },
+    clearScanHistory: async () => {
+      await window.lazarus?.invoke('history:clear');
+      set({ scanHistory: [] });
+    },
+    // Theme
+    theme: 'dark',
+    setTheme: (t) => {
+      set({ theme: t });
+      document.documentElement.classList.toggle('dark', t === 'dark');
+      document.documentElement.classList.toggle('light', t !== 'dark');
+    },
+
+    // Scan history
+    scanHistory: [],
+    loadScanHistory: async () => {
+      const h = await window.lazarus?.invoke('history:get');
+      if (h) set({ scanHistory: h });
+    },
+    clearScanHistory: async () => {
+      await window.lazarus?.invoke('history:clear');
+      set({ scanHistory: [] });
+    },
+    // Theme
+    theme: 'dark',
+    setTheme: (t) => {
+      set({ theme: t });
+      document.documentElement.classList.toggle('dark', t === 'dark');
+      document.documentElement.classList.toggle('light', t !== 'dark');
+    },
   }))
 );
 
@@ -96,6 +132,12 @@ function applyFilter(files, filter) {
       if (!f.name.toLowerCase().includes(q)) return false;
     }
     if (filter.minHealth > 0 && (f.health?.score ?? 100) < filter.minHealth) return false;
+    if (filter.ext && !f.name?.toLowerCase().endsWith('.'+filter.ext.toLowerCase().replace(/^\./,''))) return false;
+    if (filter.minSize > 0 && (f.size||0) < filter.minSize) return false;
+    if (filter.maxSize > 0 && (f.size||0) > filter.maxSize) return false;
+    if (filter.ext && !f.name?.toLowerCase().endsWith('.'+filter.ext.toLowerCase().replace(/^\./,''))) return false;
+    if (filter.minSize > 0 && (f.size||0) < filter.minSize) return false;
+    if (filter.maxSize > 0 && (f.size||0) > filter.maxSize) return false;
     return true;
   });
 }

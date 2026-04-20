@@ -28,7 +28,7 @@ export default function PreviewPanel(){
   useEffect(()=>{
     setZoom(1); setImgError(false); setCompareMode(false);
     if(!selectedFile?.path){ setPreviewSrc(null); return; }
-    if(selectedFile.type===1) setPreviewSrc(`file://${selectedFile.path}`);
+    if(selectedFile.type===1||selectedFile.type===2||selectedFile.type===3) setPreviewSrc(`file://${selectedFile.path}`);
     else setPreviewSrc(null);
   },[selectedFile]);
 

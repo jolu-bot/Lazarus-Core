@@ -1,13 +1,13 @@
 'use strict';
 const { contextBridge, ipcRenderer } = require('electron');
 
-const VALID_SEND   = new Set(['win:minimize','win:maximize','win:close','update:install','app:scan-done']);
+const VALID_SEND   = new Set(['win:minimize','win:maximize','win:close','update:install','app:scan-done','app:tray-toggle']);
 const VALID_INVOKE = new Set([
   'dialog:openFolder','dialog:saveFile','shell:openPath',
   'app:getVersion','app:getPlatform',
   'scan:start','scan:stop','scan:recover','scan:enumerate-drives',
   'scan:analyze-health','scan:repair-file',
-  'license:validate','license:get','license:activate','app:getSettings','app:setSettings',
+  'license:validate','license:get','license:activate','app:getSettings','app:setSettings','app:export-files','history:get','history:clear','app:export-files','history:get','history:clear',
   'payment:createSession','payment:checkStatus',
   'ai:repair','ai:analyze','ai:health',
 ]);
