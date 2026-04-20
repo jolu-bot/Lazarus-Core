@@ -1,12 +1,11 @@
 import React from 'react';
 import { motion }      from 'framer-motion';
-import { HardDrive, Key, Settings, Info, Sparkles, Shield } from 'lucide-react';
+import { HardDrive, Settings } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
 import clsx            from 'clsx';
 
 const NAV = [
   { id: 'scan',     icon: HardDrive, label: 'Scan & Recover' },
-  { id: 'license',  icon: Key,       label: 'License' },
   { id: 'settings', icon: Settings,  label: 'Settings' },
 ];
 

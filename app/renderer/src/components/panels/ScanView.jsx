@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Play, StopCircle, HardDrive, ChevronDown, Settings2 } from 'lucide-react';
+import { Play, StopCircle, HardDrive, ChevronDown, Settings2, RefreshCw, Usb } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
 import FileList        from './FileList';
 import PreviewPanel    from './PreviewPanel';
@@ -21,14 +21,14 @@ export default function ScanView() {
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [outputDir,   setOutputDir]   = useState('');
 
-  // ── Load drives ──────────────────────────────────────────────
+  // â”€â”€ Load drives â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
     lzr?.invoke('scan:enumerate-drives')
        .then((d) => { setDrives(d || []); if (d?.length) selectDrive(d[0]); })
        .catch(() => {});
   }, []);
 
-  // ── Listen for scan events ───────────────────────────────────
+  // â”€â”€ Listen for scan events â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
     const offFile = lzr?.on('scan:file-found', (f)   => addFile(f));
     const offProg = lzr?.on('scan:progress',   (p)   => setProgress(p));
@@ -36,7 +36,16 @@ export default function ScanView() {
     return () => { offFile?.(); offProg?.(); offDone?.(); };
   }, []);
 
-  const startScan = async () => {
+  useEffect(() => {
+    const off = lzr?.on('scan:drives-updated', (d) => { setDrives(d || []); });
+    return () => off?.();
+  }, []);
+
+  const refreshDrives = () => {
+    lzr?.invoke('scan:enumerate-drives').then((d) => { setDrives(d || []); }).catch(() => {});
+  };
+
+    const startScan = async () => {
     if (!selectedDrive) return;
     clearFiles();
     setScanState('scanning');
@@ -59,7 +68,7 @@ export default function ScanView() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* ── Top Control Bar ─────────────────────────────────── */}
+      {/* â”€â”€ Top Control Bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className="flex items-center gap-3 px-5 py-3
                       bg-bg-2 border-b border-surface-border flex-shrink-0">
         
@@ -73,8 +82,13 @@ export default function ScanView() {
           >
             <HardDrive size={15} className="text-primary flex-shrink-0" />
             <span className="flex-1 text-left text-text truncate">
-              {selectedDrive ? selectedDrive.label || selectedDrive.path : 'Select drive…'}
+              {selectedDrive ? selectedDrive.label || selectedDrive.path : 'Select driveâ€¦'}
             </span>
+            {selectedDrive && selectedDrive.interface && (
+              <span className="px-1.5 py-0.5 text-xs rounded bg-surface-3 text-text-dim font-mono">
+                {selectedDrive.interface}
+              </span>
+            )}
             {selectedDrive && (
               <span className="text-xs text-text-dim font-mono">
                 {formatBytes(selectedDrive.totalSize)}
@@ -107,7 +121,7 @@ export default function ScanView() {
                     <HardDrive size={14} />
                     <div className="flex-1">
                       <div className="font-medium">{d.label || d.path}</div>
-                      <div className="text-xs text-text-dim font-mono">{d.path}</div>
+                      <div className="text-xs text-text-dim font-mono">{d.path}{d.interface ? ' · ' + d.interface : ''}</div>
                     </div>
                     <span className="text-xs text-text-dim">{formatBytes(d.totalSize)}</span>
                   </button>
@@ -116,6 +130,13 @@ export default function ScanView() {
             )}
           </AnimatePresence>
         </div>
+
+        {/* Refresh drives */}
+        <button onClick={refreshDrives}
+          title="Refresh drives"
+          className="p-2 rounded-lg border border-surface-border text-text-dim hover:text-text hover:border-primary/30 transition-colors">
+          <RefreshCw size={14} />
+        </button>
 
         {/* Options toggle */}
         <button
@@ -155,7 +176,7 @@ export default function ScanView() {
         </motion.button>
       </div>
 
-      {/* ── Options Panel ───────────────────────────────────── */}
+      {/* â”€â”€ Options Panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <AnimatePresence>
         {optionsOpen && (
           <motion.div
@@ -187,7 +208,7 @@ export default function ScanView() {
         )}
       </AnimatePresence>
 
-      {/* ── Progress ────────────────────────────────────────── */}
+      {/* â”€â”€ Progress â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {(isScanning || scanState === 'done') && (
         <div className="px-5 py-2 bg-bg-2 border-b border-surface-border flex-shrink-0">
           <ProgressBar
@@ -198,7 +219,7 @@ export default function ScanView() {
         </div>
       )}
 
-      {/* ── Main Content ─────────────────────────────────────── */}
+      {/* â”€â”€ Main Content â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className="flex flex-1 overflow-hidden">
         <FileList />
         <PreviewPanel />

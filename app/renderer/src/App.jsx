@@ -4,7 +4,6 @@ import { useAppStore }   from './stores/useAppStore';
 import TitleBar          from './components/ui/TitleBar';
 import Sidebar           from './components/ui/Sidebar';
 import ScanView          from './components/panels/ScanView';
-import LicenseView       from './components/panels/LicenseView';
 import SettingsView      from './components/panels/SettingsView';
 
 const lzr = window.lazarus;
@@ -12,7 +11,7 @@ const lzr = window.lazarus;
 export default function App() {
   const { view, setLicense, setAIAvailable } = useAppStore();
 
-  // ── Bootstrap ──────────────────────────────────────────────────
+  // â”€â”€ Bootstrap â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
     // Load license
     lzr?.invoke('license:get').then((lic) => {
@@ -25,7 +24,7 @@ export default function App() {
     }).catch(() => setAIAvailable(false));
   }, []);
 
-  const views = { scan: ScanView, license: LicenseView, settings: SettingsView };
+  const views = { scan: ScanView, settings: SettingsView };
   const ActiveView = views[view] || ScanView;
 
   return (

@@ -9,7 +9,7 @@ const Store   = require('electron-store');
 const store   = new Store();
 
 const { setupLicenseIPC }  = require('./ipc/license');
-const { setupScanIPC }     = require('./ipc/scan');
+const { setupScanIPC, setupDriveWatcher } = require('./ipc/scan');
 const { setupPaymentIPC }  = require('./ipc/payment');
 const { setupAIIPC }       = require('./ipc/ai');
 const { startAIServer, stopAIServer } = require('./ai_process');
@@ -17,10 +17,10 @@ const { startAIServer, stopAIServer } = require('./ai_process');
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 const RENDERER_URL = isDev ? 'http://localhost:3000' : null;
 
-// ─── Security: disable remote module ─────────────────────────────
+// â”€â”€â”€ Security: disable remote module â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.disableHardwareAcceleration = false;
 
-// ─── Single instance lock ─────────────────────────────────────────
+// â”€â”€â”€ Single instance lock â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 if (!app.requestSingleInstanceLock()) {
   app.quit();
   process.exit(0);
@@ -74,11 +74,12 @@ function createWindow() {
   ipcMain.on('win:close', () => mainWindow?.close());
 }
 
-// ─── App lifecycle ────────────────────────────────────────────────
+// â”€â”€â”€ App lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.whenReady().then(async () => {
   createWindow();
   setupLicenseIPC(ipcMain, store);
   setupScanIPC(ipcMain);
+  setupDriveWatcher(mainWindow);
   setupPaymentIPC(ipcMain, store);
   setupAIIPC(ipcMain);
 
@@ -106,7 +107,7 @@ app.on('second-instance', () => {
   }
 });
 
-// ─── Auto Updater ─────────────────────────────────────────────────
+// â”€â”€â”€ Auto Updater â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function checkForUpdates() {
   autoUpdater.checkForUpdatesAndNotify().catch(console.error);
   autoUpdater.on('update-available', (info) => {
@@ -121,7 +122,7 @@ ipcMain.on('update:install', () => {
   autoUpdater.quitAndInstall();
 });
 
-// ─── Dialog helpers ───────────────────────────────────────────────
+// â”€â”€â”€ Dialog helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 ipcMain.handle('dialog:openFolder', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openDirectory'],

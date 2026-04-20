@@ -1,18 +1,20 @@
 'use strict';
 const { contextBridge, ipcRenderer } = require('electron');
 
-// ─── Validated IPC channels ───────────────────────────────────────
-const VALID_SEND    = new Set(['win:minimize','win:maximize','win:close',
-                                'update:install']);
-const VALID_INVOKE  = new Set(['dialog:openFolder','dialog:saveFile',
-                                'shell:openPath','app:getVersion','app:getPlatform',
-                                'scan:start','scan:stop','scan:recover',
-                                'scan:enumerate-drives',
-                                'license:validate','license:get','license:activate',
-                                'payment:createSession','payment:checkStatus',
-                                'ai:repair','ai:analyze','ai:health']);
-const VALID_ON      = new Set(['update:available','update:ready',
-                                'scan:progress','scan:file-found','scan:done']);
+const VALID_SEND   = new Set(['win:minimize','win:maximize','win:close','update:install']);
+const VALID_INVOKE = new Set([
+  'dialog:openFolder','dialog:saveFile','shell:openPath',
+  'app:getVersion','app:getPlatform',
+  'scan:start','scan:stop','scan:recover','scan:enumerate-drives',
+  'scan:analyze-health','scan:repair-file',
+  'license:validate','license:get','license:activate',
+  'payment:createSession','payment:checkStatus',
+  'ai:repair','ai:analyze','ai:health',
+]);
+const VALID_ON = new Set([
+  'update:available','update:ready',
+  'scan:progress','scan:file-found','scan:done','scan:drives-updated',
+]);
 
 contextBridge.exposeInMainWorld('lazarus', {
   send: (ch, ...a) => {
