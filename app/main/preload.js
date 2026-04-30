@@ -7,13 +7,16 @@ const VALID_INVOKE = new Set([
   'app:getVersion','app:getPlatform',
   'scan:start','scan:stop','scan:recover','scan:enumerate-drives',
   'scan:analyze-health','scan:repair-file',
-  'license:validate','license:get','license:activate','app:getSettings','app:setSettings','app:export-files','history:get','history:clear','app:export-files','history:get','history:clear',
+  'license:validate','license:get','license:activate',
+  'app:getSettings','app:setSettings','app:export-files',
+  'history:get','history:clear',
   'payment:createSession','payment:checkStatus',
   'ai:repair','ai:analyze','ai:health',
 ]);
 const VALID_ON = new Set([
   'update:available','update:ready',
   'scan:progress','scan:file-found','scan:done','scan:drives-updated',
+  'scan:drive-connected','scan:drive-disconnected',
 ]);
 
 contextBridge.exposeInMainWorld('lazarus', {

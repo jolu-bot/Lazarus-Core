@@ -89,21 +89,38 @@ async function enumerateDrives() {
 }
 
 var driveWatchInterval = null;
-var lastDriveSnapshot  = '';
+var lastDriveMap       = {};
+
+function buildDriveMap(drives) {
+  var m = {};
+  drives.forEach(function(d) { m[d.path] = d; });
+  return m;
+}
 
 function setupDriveWatcher(mainWindow) {
   if (driveWatchInterval) clearInterval(driveWatchInterval);
+  enumerateDrives().then(function(drives) {
+    lastDriveMap = buildDriveMap(drives);
+    if (mainWindow && !mainWindow.isDestroyed())
+      mainWindow.webContents.send('scan:drives-updated', drives);
+  }).catch(function() {});
   driveWatchInterval = setInterval(async function() {
     try {
-      var drives   = await enumerateDrives();
-      var snapshot = JSON.stringify(drives.map(function(d){ return d.path; }).sort());
-      if (snapshot !== lastDriveSnapshot) {
-        lastDriveSnapshot = snapshot;
-        if (mainWindow && !mainWindow.isDestroyed())
+      var drives  = await enumerateDrives();
+      var newMap  = buildDriveMap(drives);
+      var connected = [], disconnected = [];
+      Object.keys(newMap).forEach(function(p) { if (!lastDriveMap[p]) connected.push(newMap[p]); });
+      Object.keys(lastDriveMap).forEach(function(p) { if (!newMap[p]) disconnected.push(lastDriveMap[p]); });
+      if (connected.length > 0 || disconnected.length > 0) {
+        lastDriveMap = newMap;
+        if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('scan:drives-updated', drives);
+          connected.forEach(function(d) { mainWindow.webContents.send('scan:drive-connected', d); });
+          disconnected.forEach(function(d) { mainWindow.webContents.send('scan:drive-disconnected', d); });
+        }
       }
     } catch(e) {}
-  }, 1500);
+  }, 800);
 }
 
 function setupScanIPC(ipcMain) {

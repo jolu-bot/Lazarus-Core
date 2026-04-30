@@ -32,3 +32,8 @@ Thumbs.db
 *.log
 npm-debug.log*
 
+
+# Build outputs
+app/dist-build/
+app/dist-build-*/
+.vscode/

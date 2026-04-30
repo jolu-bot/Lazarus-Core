@@ -15,7 +15,7 @@ export default function ScanView() {
     setDrives, selectDrive, setScanState, setProgress,
     addFile, clearFiles, setScanOptions,
     outputDir, setOutputDir, setScanStartTime, scanStartTime,
-    license,
+    license, addToast,
   } = useAppStore();
 
   const [driveOpen,   setDriveOpen]   = useState(false);
@@ -39,7 +39,15 @@ export default function ScanView() {
 
   useEffect(() => {
     const off = lzr?.on('scan:drives-updated', (d) => { setDrives(d || []); });
-    return () => off?.();
+    const offC = lzr?.on('scan:drive-connected', (d) => {
+      setDrives(prev => [...prev.filter(x => x.path !== d.path), d]);
+      addToast(d.label + ' connected', 'success');
+    });
+    const offD = lzr?.on('scan:drive-disconnected', (d) => {
+      setDrives(prev => prev.filter(x => x.path !== d.path));
+      addToast(d.label + ' disconnected', 'warning');
+    });
+    return () => { off?.(); offC?.(); offD?.(); };
   }, []);
 
   const refreshDrives = () => {
