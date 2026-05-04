@@ -80,6 +80,39 @@ function getMockDrives() {
     serial:'', interface:'SATA', totalSize:500107862016, sectorSize:512, fs:'EXT4' }];
 }
 
+function getPythonExec() {
+  const cands = process.platform === 'win32'
+    ? [
+        path.join(__dirname, '../../../.venv312/Scripts/python.exe'),
+        path.join(__dirname, '../../../.venv/Scripts/python.exe'),
+        'python',
+      ]
+    : [
+        path.join(__dirname, '../../../.venv312/bin/python'),
+        path.join(__dirname, '../../../.venv/bin/python'),
+        'python3',
+      ];
+  return cands.find((p) => p === 'python' || p === 'python3' || fss.existsSync(p)) || (process.platform === 'win32' ? 'python' : 'python3');
+}
+
+function runPythonJson(cmd, args) {
+  return new Promise((resolve, reject) => {
+    const py = getPythonExec();
+    const script = path.join(__dirname, 'scan_backend.py');
+    const child = cp.spawn(py, [script, cmd, ...(args || [])], { cwd: __dirname, windowsHide: true });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => { out += d.toString(); });
+    child.stderr.on('data', (d) => { err += d.toString(); });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) return reject(new Error(err || ('Python backend failed: ' + code)));
+      try { resolve(JSON.parse((out || '{}').trim())); }
+      catch (e) { reject(new Error('Invalid Python JSON: ' + out)); }
+    });
+  });
+}
+
 async function enumerateDrives() {
   if (nativeAddon) {
     try { return nativeAddon.enumerateDrives(); } catch(e) {}
@@ -130,7 +163,37 @@ function setupScanIPC(ipcMain) {
   });
 
   ipcMain.handle('scan:start', async function(event, options) {
-    if (!nativeAddon) { simulateScan(event); return { started:true }; }
+    if (!nativeAddon) {
+      try {
+        const py = getPythonExec();
+        const script = path.join(__dirname, 'scan_backend.py');
+        const child = cp.spawn(py, [script, 'scan'], { cwd: __dirname, windowsHide: true });
+        const sender = event.sender;
+        let buf = '';
+        child.stdout.on('data', function(chunk) {
+          buf += chunk.toString();
+          var lines = buf.split('\n');
+          buf = lines.pop();
+          lines.forEach(function(line) {
+            line = line.trim(); if (!line) return;
+            try {
+              var msg = JSON.parse(line);
+              if (!sender.isDestroyed()) {
+                if (msg.event === 'file-found') sender.send('scan:file-found', msg.data);
+                if (msg.event === 'progress') sender.send('scan:progress', msg.data);
+                if (msg.event === 'done') sender.send('scan:done', msg.data);
+              }
+            } catch(_e) {}
+          });
+        });
+        child.stderr.on('data', function(d) { console.warn('Python scan:', d.toString()); });
+        return { started:true };
+      } catch(e) {
+        console.warn('Python scan failed, fallback simulate:', e.message);
+        simulateScan(event);
+        return { started:true };
+      }
+    }
     var sender    = event.sender;
     var outputDir = options.outputDir || path.join(os.homedir(), 'LazarusRecovered');
     nativeAddon.startScan(
@@ -157,8 +220,12 @@ function setupScanIPC(ipcMain) {
 
   ipcMain.handle('scan:recover', async function(_, devicePath, file, outputDir) {
     if (!nativeAddon) {
-      var dest = path.join(outputDir || os.homedir(), file.name || 'recovered_file');
-      return { success:true, outputPath:dest, health:file.health };
+      try {
+        return await runPythonJson('recover', ['--file-json', JSON.stringify(file || {}), '--output-dir', outputDir || '']);
+      } catch(e) {
+        var dest = path.join(outputDir || os.homedir(), file.name || 'recovered_file');
+        return { success:true, outputPath:dest, health:file.health };
+      }
     }
     try {
       var ok = nativeAddon.recoverFile(devicePath, file, outputDir);
@@ -167,11 +234,19 @@ function setupScanIPC(ipcMain) {
   });
 
   ipcMain.handle('scan:analyze-health', async function(_, file) {
+    if (!nativeAddon) {
+      try { return await runPythonJson('analyze', ['--file-json', JSON.stringify(file || {})]); }
+      catch(e) { return computeHealth(file, file.id); }
+    }
     return computeHealth(file, file.id);
   });
 
   ipcMain.handle('scan:repair-file', async function(event, args) {
     var file = args.file, outputDir = args.outputDir, mode = args.mode;
+    if (!nativeAddon) {
+      try { return await runPythonJson('repair', ['--args-json', JSON.stringify(args || {})]); }
+      catch(e) { console.warn('Python repair failed:', e.message); }
+    }
     var destDir  = outputDir || path.join(os.homedir(), 'LazarusRecovered');
     var destPath = path.join(destDir, 'repaired_' + (file.name || 'file'));
     if (!fss.existsSync(destDir)) {
