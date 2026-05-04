@@ -96,11 +96,8 @@ function createWindow() {
     console.error('Renderer process gone:', details);
   });
 
-  mainWindow.on('close', (e) => {
-    if (!isQuitting) {
-      e.preventDefault();
-      mainWindow?.hide();
-    }
+  mainWindow.on('closed', () => {
+    mainWindow = null;
   });
 
   ipcMain.on('win:minimize', () => mainWindow?.minimize());
@@ -170,10 +167,12 @@ app.on('window-all-closed', () => {
 });
 
 app.on('second-instance', () => {
-  if (mainWindow) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
+  } else {
+    createWindow();
   }
 });
 
@@ -269,5 +268,9 @@ ipcMain.on('app:tray-toggle', (_, enable) => {
   if (!enable && tray) {
     tray.destroy();
     tray = null;
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
   }
 });
