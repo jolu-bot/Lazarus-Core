@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 const path = require('path');
 const os   = require('os');
 const fss  = require('fs');
@@ -124,8 +124,8 @@ function runPythonJson(cmd, args, timeoutMs) {
   timeoutMs = timeoutMs || 30000;
   return new Promise((resolve, reject) => {
     const py     = getPythonExec();
-    const script = path.join(__dirname, 'scan_backend.py');
-    const child  = cp.spawn(py, [script, cmd, ...(args || [])], { cwd: __dirname, windowsHide: true });
+    const script = path.join(getIpcDir(), 'scan_backend.py');
+    const child  = cp.spawn(py, [script, cmd, ...(args || [])], { cwd: getIpcDir(), windowsHide: true });
     let out = '', err = '';
     let timedOut = false;
 
@@ -219,10 +219,10 @@ function setupScanIPC(ipcMain) {
     if (!nativeAddon) {
       try {
         const py     = getPythonExec();
-        const script = path.join(__dirname, 'scan_backend.py');
+        const script = path.join(getIpcDir(), 'scan_backend.py');
         const devicePath = (options && options.devicePath) ? options.devicePath : '\\\\.\\PhysicalDrive0';
         const outputDir  = (options && options.outputDir)  ? options.outputDir  : require('path').join(require('os').homedir(), 'LazarusRecovered');
-        const child  = cp.spawn(py, [script, 'scan', '--device', devicePath, '--output-dir', outputDir], { cwd: __dirname, windowsHide: true });
+        const child  = cp.spawn(py, [script, 'scan', '--device', devicePath, '--output-dir', outputDir], { cwd: getIpcDir(), windowsHide: true });
         activeScanProcess = child;
         const sender = event.sender;
         let buf = '';

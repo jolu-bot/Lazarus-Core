@@ -41,7 +41,9 @@
     "icon": "assets/icons/icon",
     "asar": true,
     "asarUnpack": [
-      "**/*.node"
+      "**/*.node",
+      "**/main/ipc/*.py",
+      "**/main/ipc/*.exe"
     ],
     "extraResources": [
       {

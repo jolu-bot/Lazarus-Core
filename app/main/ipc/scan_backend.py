@@ -124,7 +124,7 @@ PHOTOREC_BINS = ['photorec_win.exe', 'photorec.exe', 'photorec']
 def find_photorec():
     base = Path(__file__).parent
     for name in PHOTOREC_BINS:
-        for d in [base / 'bin', base / '../resources/bin', base / '../../resources/bin', base]:
+        for d in [base, base / 'bin', base / '../resources/bin', base / '../../resources/bin']:
             p = d / name
             if p.exists():
                 return str(p.resolve())
