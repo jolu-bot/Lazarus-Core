@@ -220,7 +220,9 @@ function setupScanIPC(ipcMain) {
       try {
         const py     = getPythonExec();
         const script = path.join(__dirname, 'scan_backend.py');
-        const child  = cp.spawn(py, [script, 'scan'], { cwd: __dirname, windowsHide: true });
+        const devicePath = (options && options.devicePath) ? options.devicePath : '\\\\.\\PhysicalDrive0';
+        const outputDir  = (options && options.outputDir)  ? options.outputDir  : require('path').join(require('os').homedir(), 'LazarusRecovered');
+        const child  = cp.spawn(py, [script, 'scan', '--device', devicePath, '--output-dir', outputDir], { cwd: __dirname, windowsHide: true });
         activeScanProcess = child;
         const sender = event.sender;
         let buf = '';
