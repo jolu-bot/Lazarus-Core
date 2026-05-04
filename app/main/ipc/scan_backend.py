@@ -416,6 +416,52 @@ def _parse_ntfs_boot(bs: bytes):
     return bps, spc, mft_cluster, rec_size
 
 
+def _apply_fixup(rec: bytes, sector_size: int = 512) -> Optional[bytes]:
+    # Apply Update Sequence Array fixups to restore sector tails in FILE records.
+    if len(rec) < 8:
+        return None
+    usa_off = struct.unpack_from('<H', rec, 4)[0]
+    usa_cnt = struct.unpack_from('<H', rec, 6)[0]
+    if usa_cnt <= 1:
+        return rec
+    if usa_off + usa_cnt * 2 > len(rec):
+        return None
+
+    out = bytearray(rec)
+    seq = rec[usa_off:usa_off + 2]
+    for i in range(1, usa_cnt):
+        tail = i * sector_size - 2
+        if tail + 2 > len(out):
+            return None
+        # tail must match USA sequence number before replacement
+        if out[tail:tail + 2] != seq:
+            return None
+        fix = rec[usa_off + i * 2: usa_off + i * 2 + 2]
+        out[tail:tail + 2] = fix
+    return bytes(out)
+
+
+def _build_mft_full_path(rec_ref: int, name_map: Dict[int, Tuple[str, int]], max_depth: int = 64) -> str:
+    parts: List[str] = []
+    cur = rec_ref
+    seen = set()
+    for _ in range(max_depth):
+        if cur in seen:
+            break
+        seen.add(cur)
+        item = name_map.get(cur)
+        if not item:
+            break
+        name, parent = item
+        if name and name not in ('.', '..'):
+            parts.append(name)
+        if parent == cur or parent in (0, 5):
+            break
+        cur = parent
+    parts.reverse()
+    return '\\'.join(parts)
+
+
 def _decode_filename_attr(buf: bytes) -> Tuple[str, int]:
     if len(buf) < 66:
         return '', 0
@@ -469,79 +515,149 @@ def scan_ntfs_mft(max_records_per_volume: int = 40000) -> List[dict]:
             if not info:
                 fh.close()
                 continue
+
             bps, spc, mft_cluster, rec_size = info
             cluster_size = bps * spc
             mft_off = mft_cluster * cluster_size
 
+            name_map: Dict[int, Tuple[str, int]] = {}
+            files_meta: List[dict] = []
+
             for rec_idx in range(max_records_per_volume):
                 off = mft_off + rec_idx * rec_size
                 fh.seek(off)
-                rec = fh.read(rec_size)
-                if len(rec) < 48:
+                rec_raw = fh.read(rec_size)
+                if len(rec_raw) < 48:
                     break
-                if rec[0:4] != b'FILE':
+                if rec_raw[0:4] != b'FILE':
+                    continue
+
+                rec = _apply_fixup(rec_raw)
+                if rec is None or rec[0:4] != b'FILE':
                     continue
 
                 attr_off = struct.unpack_from('<H', rec, 20)[0]
                 flags = struct.unpack_from('<H', rec, 22)[0]
                 in_use = bool(flags & 0x0001)
                 is_dir = bool(flags & 0x0002)
-                if is_dir:
-                    continue
 
                 name = ''
                 parent_ref = 5
                 size = 0
-                p = attr_off
-                while p + 8 < len(rec):
-                    atype = struct.unpack_from('<I', rec, p)[0]
+                resident_data: bytes = b''
+                data_runs: List[Tuple[int, int]] = []
+                data_real_size = 0
+
+                pcur = attr_off
+                while pcur + 8 < len(rec):
+                    atype = struct.unpack_from('<I', rec, pcur)[0]
                     if atype == 0xFFFFFFFF:
                         break
-                    alen = struct.unpack_from('<I', rec, p + 4)[0]
-                    if alen <= 0 or p + alen > len(rec):
+                    alen = struct.unpack_from('<I', rec, pcur + 4)[0]
+                    if alen <= 0 or pcur + alen > len(rec):
                         break
-                    non_resident = rec[p + 8]
+
+                    non_resident = rec[pcur + 8]
+                    name_len_attr = rec[pcur + 9]
+
                     if atype == 0x30 and non_resident == 0:
-                        vlen = struct.unpack_from('<I', rec, p + 16)[0]
-                        voff = struct.unpack_from('<H', rec, p + 20)[0]
-                        v = rec[p + voff:p + voff + vlen]
+                        vlen = struct.unpack_from('<I', rec, pcur + 16)[0]
+                        voff = struct.unpack_from('<H', rec, pcur + 20)[0]
+                        v = rec[pcur + voff:pcur + voff + vlen]
                         nm, pref = _decode_filename_attr(v)
                         if nm:
                             name = nm
                             parent_ref = pref
+
                     elif atype == 0x80:
+                        # Use unnamed DATA stream only.
+                        if name_len_attr > 0:
+                            pcur += alen
+                            continue
+
                         if non_resident == 0:
-                            vlen = struct.unpack_from('<I', rec, p + 16)[0]
+                            vlen = struct.unpack_from('<I', rec, pcur + 16)[0]
+                            voff = struct.unpack_from('<H', rec, pcur + 20)[0]
+                            resident_data = rec[pcur + voff:pcur + voff + vlen]
                             size = max(size, int(vlen))
+                            data_real_size = max(data_real_size, int(vlen))
                         else:
-                            alloc = struct.unpack_from('<Q', rec, p + 40)[0]
-                            real = struct.unpack_from('<Q', rec, p + 48)[0]
-                            size = max(size, int(real or alloc))
-                    p += alen
+                            run_off = struct.unpack_from('<H', rec, pcur + 32)[0]
+                            real_size = struct.unpack_from('<Q', rec, pcur + 48)[0]
+                            init_size = struct.unpack_from('<Q', rec, pcur + 56)[0]
+                            run_blob = rec[pcur + run_off:pcur + alen]
+                            runs = _read_runlist(run_blob)
+                            if runs:
+                                data_runs = runs
+                            data_real_size = max(data_real_size, int(real_size or init_size))
+                            size = max(size, int(real_size or init_size))
+
+                    pcur += alen
 
                 if not name:
                     continue
+
+                name_map[rec_idx] = (name, parent_ref)
+
+                if is_dir:
+                    continue
+
                 ext = name.rsplit('.', 1)[-1].lower() if '.' in name else 'bin'
                 conf = 0.95 if not in_use else 0.72
                 status = 2 if not in_use else 1
-                f = {
-                    'id': len(found),
+
+                fm = {
+                    'rec_idx': rec_idx,
                     'name': name,
+                    'parent_ref': parent_ref,
                     'extension': ext,
                     'size': int(size),
                     'type': type_for_ext(ext),
                     'status': status,
                     'confidence': conf,
                     'recoverable': True,
-                    'path': vol + '\\' + name,
+                    'fs': 1,
+                    'source': 'ntfs_mft',
+                    'volume': vol,
+                    'cluster_size': int(cluster_size),
+                    'mft_record_size': int(rec_size),
+                    'mft_offset': int(mft_off),
+                    'runlist': data_runs,
+                    'resident_b64': base64.b64encode(resident_data).decode('ascii') if resident_data and len(resident_data) <= 1024 * 1024 else '',
+                    'file_size': int(data_real_size or size),
+                }
+                files_meta.append(fm)
+
+            for fm in files_meta:
+                rec_idx = int(fm['rec_idx'])
+                rel = _build_mft_full_path(rec_idx, name_map)
+                full_name = rel if rel else fm['name']
+                f = {
+                    'id': len(found),
+                    'name': full_name,
+                    'extension': fm['extension'],
+                    'size': fm['size'],
+                    'type': fm['type'],
+                    'status': fm['status'],
+                    'confidence': fm['confidence'],
+                    'recoverable': True,
+                    'path': fm['volume'] + '\\' + full_name,
                     'outputPath': '',
                     'fs': 1,
                     'mft_ref': rec_idx,
-                    'parent_ref': parent_ref,
+                    'parent_ref': fm['parent_ref'],
                     'source': 'ntfs_mft',
+                    'volume': fm['volume'],
+                    'cluster_size': fm['cluster_size'],
+                    'mft_record_size': fm['mft_record_size'],
+                    'mft_offset': fm['mft_offset'],
+                    'runlist': fm['runlist'],
+                    'resident_b64': fm['resident_b64'],
+                    'file_size': fm['file_size'],
                 }
                 f['health'] = compute_health(f, len(found))
                 found.append(f)
+
         except Exception as e:
             log_err(f'MFT scan error on {vol}: {e}')
         finally:
@@ -550,8 +666,6 @@ def scan_ntfs_mft(max_records_per_volume: int = 40000) -> List[dict]:
             except Exception:
                 pass
     return found
-
-
 def run_logical_scan(out_path: Path, start_id: int = 0) -> int:
     sources = []
     if os.name == 'nt':
@@ -840,22 +954,112 @@ REPAIR_FUNCS = {
 }
 
 
+def _recover_ntfs_mft_file(file_obj: dict, dest: Path) -> bool:
+    vol = (file_obj.get('volume') or '')
+    if not vol:
+        p = str(file_obj.get('path') or '')
+        if len(p) >= 2 and p[1] == ':':
+            vol = p[:2]
+    if not vol:
+        return False
+
+    # Resident data can be written directly.
+    rb64 = file_obj.get('resident_b64') or ''
+    if rb64:
+        try:
+            raw = base64.b64decode(rb64)
+            wanted = int(file_obj.get('file_size') or len(raw) or 0)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(raw[:wanted] if wanted > 0 else raw)
+            return dest.exists() and dest.stat().st_size >= 0
+        except Exception as e:
+            log_err(f'NTFS resident recover error: {e}')
+
+    runs = file_obj.get('runlist') or []
+    if not isinstance(runs, list) or not runs:
+        return False
+
+    cluster_size = int(file_obj.get('cluster_size') or 4096)
+    file_size = int(file_obj.get('file_size') or 0)
+    remaining = file_size if file_size > 0 else None
+
+    fh, err = _open_volume(vol)
+    if not fh:
+        log_err(f'NTFS recover open volume failed: {err}')
+        return False
+
+    written = 0
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, 'wb') as wf:
+            for run in runs:
+                if not isinstance(run, (list, tuple)) or len(run) != 2:
+                    continue
+                lcn = int(run[0])
+                clen = int(run[1])
+                if clen <= 0:
+                    continue
+
+                run_bytes = clen * cluster_size
+                if remaining is not None:
+                    run_bytes = min(run_bytes, remaining)
+                if run_bytes <= 0:
+                    break
+
+                if lcn <= 0:
+                    wf.write(b'\x00' * run_bytes)
+                    written += run_bytes
+                else:
+                    fh.seek(lcn * cluster_size)
+                    left = run_bytes
+                    while left > 0:
+                        chunk = fh.read(min(1024 * 1024, left))
+                        if not chunk:
+                            break
+                        wf.write(chunk)
+                        csz = len(chunk)
+                        written += csz
+                        left -= csz
+
+                if remaining is not None:
+                    remaining -= run_bytes
+                    if remaining <= 0:
+                        break
+        return written > 0 and dest.exists()
+    except Exception as e:
+        log_err(f'NTFS non-resident recover error: {e}')
+        return False
+    finally:
+        try:
+            fh.close()
+        except Exception:
+            pass
+
+
 def cmd_recover(file_obj: dict, out_dir: str):
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    src = file_obj.get('outputPath') or file_obj.get('path') or ''
-    name = file_obj.get('name') or 'recovered_file'
-    dest = str(out_path / name)
+
+    raw_name = file_obj.get('name') or 'recovered_file'
+    safe_name = str(raw_name).replace('..', '_').replace(':', '_')
+    dest = out_path / safe_name
+
     success = False
-    if src and Path(src).exists():
-        try:
-            shutil.copy2(src, dest)
-            success = True
-        except Exception as e:
-            log_err(f'Copy error: {e}')
-    print(json.dumps({'success': success, 'outputPath': dest, 'health': file_obj.get('health')}))
 
+    if file_obj.get('source') == 'ntfs_mft':
+        success = _recover_ntfs_mft_file(file_obj, dest)
 
+    if not success:
+        src = file_obj.get('outputPath') or file_obj.get('path') or ''
+        if src and Path(src).exists():
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, str(dest))
+                success = True
+            except Exception as e:
+                log_err(f'Copy error: {e}')
+
+    print(json.dumps({'success': success, 'outputPath': str(dest), 'health': file_obj.get('health')}))
 def cmd_repair(args_obj: dict):
     file_obj = args_obj.get('file') or {}
     out_dir = args_obj.get('outputDir') or str(Path.home() / 'LazarusRecovered')
