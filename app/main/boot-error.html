@@ -1,0 +1,34 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lazarus Core - UI Load Error</title>
+  <style>
+    body { margin: 0; font-family: Segoe UI, sans-serif; background: #0a0a0f; color: #e8e8e8; }
+    .wrap { max-width: 860px; margin: 0 auto; padding: 28px; }
+    h1 { margin: 0 0 10px; font-size: 24px; }
+    p { opacity: 0.9; }
+    .box { margin-top: 16px; border: 1px solid #2e2e3c; border-radius: 10px; padding: 12px; background: #13131b; }
+    .k { color: #8aa4ff; }
+    .v { word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Lazarus Core - UI Load Error</h1>
+    <p>The interface could not be loaded. Reinstall the app or send this error to support.</p>
+    <div class="box">
+      <div><span class="k">Code:</span> <span id="code" class="v"></span></div>
+      <div><span class="k">Reason:</span> <span id="reason" class="v"></span></div>
+      <div><span class="k">URL:</span> <span id="url" class="v"></span></div>
+    </div>
+  </div>
+  <script>
+    const q = new URLSearchParams(location.search);
+    document.getElementById('code').textContent = q.get('code') || 'n/a';
+    document.getElementById('reason').textContent = q.get('reason') || 'n/a';
+    document.getElementById('url').textContent = q.get('url') || 'n/a';
+  </script>
+</body>
+</html>

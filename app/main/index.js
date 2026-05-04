@@ -17,6 +17,11 @@ const { startAIServer, stopAIServer } = require('./ai_process');
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 const RENDERER_URL = isDev ? 'http://localhost:3000' : null;
 
+if (!isDev) {
+  // Keep production logs readable by hiding noisy Node deprecation warnings.
+  process.noDeprecation = true;
+}
+
 app.disableHardwareAcceleration = false;
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -69,19 +74,21 @@ function createWindow() {
     if (!isDev) checkForUpdates();
   });
 
-  mainWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
+  mainWindow.webContents.on('did-fail-load', async (_e, code, desc, url) => {
     console.error('Renderer failed to load:', code, desc, url);
     if (!mainWindow || mainWindow.isDestroyed()) return;
-    const html = `
-      <html><body style="font-family:Segoe UI,sans-serif;background:#0A0A0F;color:#E8E8E8;padding:24px;">
-      <h2>Lazarus Core - UI Load Error</h2>
-      <p>The interface failed to load.</p>
-      <p><b>Code:</b> ${code}</p>
-      <p><b>Reason:</b> ${desc}</p>
-      <p><b>URL:</b> ${url || 'n/a'}</p>
-      <p>Try reinstalling or contact support with this message.</p>
-      </body></html>`;
-    mainWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    try {
+      await mainWindow.loadFile(path.join(__dirname, 'boot-error.html'), {
+        query: {
+          code: String(code ?? ''),
+          reason: String(desc ?? ''),
+          url: String(url || 'n/a'),
+        },
+      });
+    } catch (err) {
+      // Last-resort fallback if the local error page is unavailable.
+      await mainWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent('Lazarus Core failed to load UI.'));
+    }
     mainWindow.show();
   });
 
