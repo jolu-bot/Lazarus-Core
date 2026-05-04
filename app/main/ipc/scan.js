@@ -353,26 +353,75 @@ function setupScanIPC(ipcMain) {
           file.devicePath || '\\\\.\\PhysicalDrive0', file, destDir);
       } catch(e){}
     } else { recoveryOk = true; }
-    if (file.type === 1 && file.path) {
-      var axios = require('axios');
+    // ── Image repair via AI server (proper form-data, dynamic port) ────────
+    if (file.type === 1 && (file.path || destPath)) {
       try {
-        var resp = await axios.post('http://localhost:8765/repair/image',
-          { file_path:file.path || destPath, enhance:true, use_ai:mode !== 'minor' },
-          { timeout:30000 });
-        if (resp.data.success) {
-          var nh = Object.assign({}, file.health || {}, {
-            score:Math.min(100, ((file.health && file.health.score) || 50) + 25),
-            repairMode:0, label:'Excellent - repaired' });
-          return { success:true, outputPath:destPath, image_b64:resp.data.image_b64,
-                   confidence:resp.data.confidence, health:nh, repaired:true };
+        var _aiProc = require('../ai_process');
+        var FormData = require('form-data');
+        var axios    = require('axios');
+        var srcPath  = (file.path && fss.existsSync(file.path)) ? file.path : destPath;
+        if (fss.existsSync(srcPath)) {
+          var form = new FormData();
+          form.append('file', fss.createReadStream(srcPath));
+          var useAI = mode !== 'minor' ? 'true' : 'false';
+          var resp = await axios.post(
+            'http://127.0.0.1:' + _aiProc.AI_PORT + '/repair/image?enhance=true&use_ai=' + useAI,
+            form,
+            { headers: Object.assign({}, form.getHeaders(), { 'x-api-key': _aiProc.AI_SECRET }),
+              timeout: 120000 });
+          if (resp.data && resp.data.success) {
+            return { success:true, outputPath:destPath, image_b64:resp.data.image_b64,
+                     confidence:resp.data.confidence, health:file.health, repaired:true };
+          }
         }
-      } catch(e) { console.warn('AI unavailable:', e.message); }
+      } catch(e) { appendLog('WARN AI image repair: ' + e.message); }
     }
-    var nh2 = Object.assign({}, file.health || {}, {
-      score:Math.min(100, ((file.health && file.health.score) || 50) + 15),
-      repairMode:Math.max(0, ((file.health && file.health.repairMode) || 0) - 1),
-      label:'Repaired (basic)' });
-    return { success:recoveryOk, outputPath:destPath, health:nh2, repaired:recoveryOk };
+    // ── Audio repair via AI server ────────────────────────────────────────
+    if ((file.ext === 'mp3' || file.ext === 'wav') && (file.path || destPath)) {
+      try {
+        var _aiProc = require('../ai_process');
+        var FormData = require('form-data');
+        var axios    = require('axios');
+        var srcPath  = (file.path && fss.existsSync(file.path)) ? file.path : destPath;
+        if (fss.existsSync(srcPath)) {
+          var form = new FormData();
+          form.append('file', fss.createReadStream(srcPath));
+          var resp = await axios.post(
+            'http://127.0.0.1:' + _aiProc.AI_PORT + '/repair/audio',
+            form,
+            { headers: Object.assign({}, form.getHeaders(), { 'x-api-key': _aiProc.AI_SECRET }),
+              timeout: 60000 });
+          if (resp.data && resp.data.success) {
+            return { success:true, outputPath:destPath, file_b64:resp.data.file_b64,
+                     health:file.health, repaired:true };
+          }
+        }
+      } catch(e) { appendLog('WARN AI audio repair: ' + e.message); }
+    }
+    // ── Document repair via AI server ─────────────────────────────────────
+    var docExts = ['docx','xlsx','pptx','odt','ods','pdf'];
+    if (docExts.indexOf(file.ext || '') >= 0 && (file.path || destPath)) {
+      try {
+        var _aiProc = require('../ai_process');
+        var FormData = require('form-data');
+        var axios    = require('axios');
+        var srcPath  = (file.path && fss.existsSync(file.path)) ? file.path : destPath;
+        if (fss.existsSync(srcPath)) {
+          var form = new FormData();
+          form.append('file', fss.createReadStream(srcPath));
+          var resp = await axios.post(
+            'http://127.0.0.1:' + _aiProc.AI_PORT + '/repair/document',
+            form,
+            { headers: Object.assign({}, form.getHeaders(), { 'x-api-key': _aiProc.AI_SECRET }),
+              timeout: 60000 });
+          if (resp.data && resp.data.success) {
+            return { success:true, outputPath:destPath, file_b64:resp.data.file_b64,
+                     health:file.health, repaired:true };
+          }
+        }
+      } catch(e) { appendLog('WARN AI document repair: ' + e.message); }
+    }
+    return { success:recoveryOk, outputPath:destPath, health:file.health || {}, repaired:recoveryOk };
   });
 }
 

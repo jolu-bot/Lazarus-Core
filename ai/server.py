@@ -1,4 +1,4 @@
-﻿"""
+"""
 LAZARUS CORE – AI Microservice (FastAPI)
 Exposes image/video repair endpoints callable from Electron via HTTP.
 """
@@ -25,6 +25,13 @@ try:
     from repair.model import reconstruct_image
 except Exception:
     def reconstruct_image(img, mask, weights_path=None): return img
+
+try:
+    from repair.audio_repair    import repair_audio_bytes
+    from repair.document_repair import repair_document_bytes
+except Exception:
+    def repair_audio_bytes(data, filename=''): return None
+    def repair_document_bytes(data, ext=''): return None
 
 
 # ─── App ─────────────────────────────────────────────────────────
@@ -166,6 +173,47 @@ async def enhance_image_route(file: UploadFile = File(...),
         raise HTTPException(status_code=422, detail="Enhancement failed")
     return Response(content=result, media_type="image/jpeg")
 
+
+
+
+class AudioRepairResponse(BaseModel):
+    success:  bool
+    file_b64: str = ''
+    message:  str = ''
+
+class DocRepairResponse(BaseModel):
+    success:  bool
+    file_b64: str = ''
+    message:  str = ''
+
+
+@app.post('/repair/audio', response_model=AudioRepairResponse)
+async def repair_audio(file: UploadFile = File(...),
+                       x_api_key: str = Header(default=None)):
+    _check_auth(x_api_key)
+    data = await file.read()
+    if not data:
+        return AudioRepairResponse(success=False, message='Empty file')
+    result = repair_audio_bytes(data, file.filename or '')
+    if result is None:
+        return AudioRepairResponse(success=False, message='Unknown audio format')
+    import base64 as _b
+    return AudioRepairResponse(success=True, file_b64=_b.b64encode(result).decode())
+
+
+@app.post('/repair/document', response_model=DocRepairResponse)
+async def repair_document(file: UploadFile = File(...),
+                           x_api_key: str = Header(default=None)):
+    _check_auth(x_api_key)
+    data = await file.read()
+    if not data:
+        return DocRepairResponse(success=False, message='Empty file')
+    ext = (file.filename or '').rsplit('.', 1)[-1].lower()
+    result = repair_document_bytes(data, ext)
+    if result is None:
+        return DocRepairResponse(success=False, message='Unknown document format')
+    import base64 as _b
+    return DocRepairResponse(success=True, file_b64=_b.b64encode(result).decode())
 
 # ─── Entry Point ─────────────────────────────────────────────────
 if __name__ == "__main__":

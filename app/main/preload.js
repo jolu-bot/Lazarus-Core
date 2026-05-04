@@ -11,7 +11,7 @@ const VALID_INVOKE = new Set([
   'app:getSettings','app:setSettings','app:export-files',
   'history:get','history:clear',
   'payment:createSession','payment:checkStatus',
-  'ai:repair','ai:analyze','ai:health',
+  'ai:repair','ai:analyze','ai:health','ai:repair-audio','ai:repair-document',
 ]);
 const VALID_ON = new Set([
   'update:available','update:ready',

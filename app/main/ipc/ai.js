@@ -51,6 +51,34 @@ function setupAIIPC(ipcMain) {
       return { success: false, message: e.message };
     }
   });
+
+  ipcMain.handle('ai:repair-audio', async (_, { filePath }) => {
+    try {
+      const form = new FormData();
+      form.append('file', fs.createReadStream(filePath));
+      const r = await axios.post(AI_BASE + '/repair/audio', form, {
+        headers: { ...form.getHeaders(), 'x-api-key': AI_SECRET },
+        timeout: 60000,
+      });
+      return r.data;
+    } catch (e) {
+      return { success: false, message: e.message };
+    }
+  });
+
+  ipcMain.handle('ai:repair-document', async (_, { filePath }) => {
+    try {
+      const form = new FormData();
+      form.append('file', fs.createReadStream(filePath));
+      const r = await axios.post(AI_BASE + '/repair/document', form, {
+        headers: { ...form.getHeaders(), 'x-api-key': AI_SECRET },
+        timeout: 60000,
+      });
+      return r.data;
+    } catch (e) {
+      return { success: false, message: e.message };
+    }
+  });
 }
 
 module.exports = { setupAIIPC };
