@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 const path = require('path');
 const os   = require('os');
 const fss  = require('fs');
@@ -8,6 +8,28 @@ let nativeAddon = null;
 try { nativeAddon = require('../../native/lazarus_core.node'); }
 catch (e) { console.warn('Native addon:', e.message); }
 
+// ─── Persistent log ──────────────────────────────────────────────────────────
+let _logPath = null;
+function getLogPath() {
+  if (_logPath) return _logPath;
+  try {
+    const { app } = require('electron');
+    _logPath = path.join(app.getPath('userData'), 'lazarus-scan.log');
+  } catch(_) {
+    _logPath = path.join(os.homedir(), 'lazarus-scan.log');
+  }
+  return _logPath;
+}
+function appendLog(line) {
+  try {
+    fss.appendFileSync(getLogPath(), '[' + new Date().toISOString() + '] ' + line + '\n', 'utf8');
+  } catch(_) {}
+}
+
+// ─── Active scan process (for watchdog + stop) ───────────────────────────────
+let activeScanProcess = null;
+
+// ─── Seeded RNG ───────────────────────────────────────────────────────────────
 function pseudoRandom(seed) {
   var s = seed + 1;
   return function(max) {
@@ -34,6 +56,7 @@ function computeHealth(file, seed) {
            frags:frags, repairMode:repairMode, label:labels[repairMode], existsOnDisk:st===0 };
 }
 
+// ─── Windows drive enumeration ────────────────────────────────────────────────
 function getWindowsDrives() {
   return new Promise(function(resolve) {
     cp.exec('wmic diskdrive get DeviceID,Model,Size,InterfaceType,SerialNumber /format:csv',
@@ -80,6 +103,7 @@ function getMockDrives() {
     serial:'', interface:'SATA', totalSize:500107862016, sectorSize:512, fs:'EXT4' }];
 }
 
+// ─── Python helpers ───────────────────────────────────────────────────────────
 function getPythonExec() {
   const cands = process.platform === 'win32'
     ? [
@@ -95,17 +119,32 @@ function getPythonExec() {
   return cands.find((p) => p === 'python' || p === 'python3' || fss.existsSync(p)) || (process.platform === 'win32' ? 'python' : 'python3');
 }
 
-function runPythonJson(cmd, args) {
+// runPythonJson with 30s watchdog timeout
+function runPythonJson(cmd, args, timeoutMs) {
+  timeoutMs = timeoutMs || 30000;
   return new Promise((resolve, reject) => {
-    const py = getPythonExec();
+    const py     = getPythonExec();
     const script = path.join(__dirname, 'scan_backend.py');
-    const child = cp.spawn(py, [script, cmd, ...(args || [])], { cwd: __dirname, windowsHide: true });
-    let out = '';
-    let err = '';
+    const child  = cp.spawn(py, [script, cmd, ...(args || [])], { cwd: __dirname, windowsHide: true });
+    let out = '', err = '';
+    let timedOut = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill('SIGKILL'); } catch(_) {}
+      appendLog('WARN Python ' + cmd + ' timed out after ' + timeoutMs + 'ms');
+      reject(new Error('Python backend timeout: ' + cmd));
+    }, timeoutMs);
+
     child.stdout.on('data', (d) => { out += d.toString(); });
-    child.stderr.on('data', (d) => { err += d.toString(); });
-    child.on('error', reject);
+    child.stderr.on('data', (d) => {
+      err += d.toString();
+      appendLog('STDERR[' + cmd + '] ' + d.toString().trim());
+    });
+    child.on('error', (e) => { clearTimeout(timer); reject(e); });
     child.on('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut) return;
       if (code !== 0) return reject(new Error(err || ('Python backend failed: ' + code)));
       try { resolve(JSON.parse((out || '{}').trim())); }
       catch (e) { reject(new Error('Invalid Python JSON: ' + out)); }
@@ -113,6 +152,7 @@ function runPythonJson(cmd, args) {
   });
 }
 
+// ─── Drive enumeration ────────────────────────────────────────────────────────
 async function enumerateDrives() {
   if (nativeAddon) {
     try { return nativeAddon.enumerateDrives(); } catch(e) {}
@@ -156,20 +196,45 @@ function setupDriveWatcher(mainWindow) {
   }, 800);
 }
 
+// ─── IPC handlers ─────────────────────────────────────────────────────────────
 function setupScanIPC(ipcMain) {
 
   ipcMain.handle('scan:enumerate-drives', async function() {
     return enumerateDrives();
   });
 
+  // Stop an active Python scan
+  ipcMain.handle('scan:stop', function() {
+    if (activeScanProcess) {
+      try {
+        activeScanProcess.kill('SIGKILL');
+        appendLog('INFO scan:stop — process killed by user');
+      } catch(_) {}
+      activeScanProcess = null;
+    }
+    return { stopped: true };
+  });
+
   ipcMain.handle('scan:start', async function(event, options) {
     if (!nativeAddon) {
       try {
-        const py = getPythonExec();
+        const py     = getPythonExec();
         const script = path.join(__dirname, 'scan_backend.py');
-        const child = cp.spawn(py, [script, 'scan'], { cwd: __dirname, windowsHide: true });
+        const child  = cp.spawn(py, [script, 'scan'], { cwd: __dirname, windowsHide: true });
+        activeScanProcess = child;
         const sender = event.sender;
         let buf = '';
+        let fileCount = 0;
+
+        const SCAN_TIMEOUT = 5 * 60 * 1000; // 5 min watchdog
+        const watchdog = setTimeout(() => {
+          appendLog('WARN scan timed out after 5 min — killing Python process');
+          try { child.kill('SIGKILL'); } catch(_) {}
+          if (!sender.isDestroyed()) sender.send('scan:done', { filesFound: fileCount, timedOut: true });
+        }, SCAN_TIMEOUT);
+
+        appendLog('INFO scan:start — Python engine launched (pid=' + (child.pid || '?') + ')');
+
         child.stdout.on('data', function(chunk) {
           buf += chunk.toString();
           var lines = buf.split('\n');
@@ -179,23 +244,48 @@ function setupScanIPC(ipcMain) {
             try {
               var msg = JSON.parse(line);
               if (!sender.isDestroyed()) {
-                if (msg.event === 'file-found') sender.send('scan:file-found', msg.data);
-                if (msg.event === 'progress') sender.send('scan:progress', msg.data);
-                if (msg.event === 'done') sender.send('scan:done', msg.data);
+                if (msg.event === 'file-found') { fileCount++; sender.send('scan:file-found', msg.data); }
+                if (msg.event === 'progress')   sender.send('scan:progress', msg.data);
+                if (msg.event === 'done') {
+                  clearTimeout(watchdog);
+                  activeScanProcess = null;
+                  appendLog('INFO scan:done — files found: ' + (msg.data && msg.data.filesFound != null ? msg.data.filesFound : fileCount));
+                  sender.send('scan:done', msg.data);
+                }
               }
             } catch(_e) {}
           });
         });
-        child.stderr.on('data', function(d) { console.warn('Python scan:', d.toString()); });
-        return { started:true };
+        child.stderr.on('data', function(d) {
+          const txt = d.toString().trim();
+          console.warn('Python scan:', txt);
+          appendLog('STDERR[scan] ' + txt);
+        });
+        child.on('close', function(code) {
+          clearTimeout(watchdog);
+          activeScanProcess = null;
+          if (code !== 0) {
+            appendLog('WARN Python scan exited with code ' + code);
+            if (!sender.isDestroyed()) sender.send('scan:done', { filesFound: fileCount, error: 'Python exited: ' + code });
+          }
+        });
+        child.on('error', function(e) {
+          clearTimeout(watchdog);
+          activeScanProcess = null;
+          appendLog('ERROR scan process error: ' + e.message);
+          if (!sender.isDestroyed()) sender.send('scan:done', { filesFound: fileCount, error: e.message });
+        });
+        return { started: true };
       } catch(e) {
-        console.warn('Python scan failed, fallback simulate:', e.message);
-        simulateScan(event);
-        return { started:true };
+        appendLog('ERROR scan:start failed — ' + e.message);
+        if (!event.sender.isDestroyed()) event.sender.send('scan:done', { filesFound: 0, error: 'No scan engine available: ' + e.message });
+        return { started: false, error: e.message };
       }
     }
+    // Native addon path
     var sender    = event.sender;
     var outputDir = options.outputDir || path.join(os.homedir(), 'LazarusRecovered');
+    appendLog('INFO scan:start — native addon (device=' + (options.devicePath || '?') + ')');
     nativeAddon.startScan(
       { devicePath:options.devicePath, outputDir:outputDir,
         scanNTFS:options.scanNTFS!==false, scanEXT4:options.scanEXT4!==false,
@@ -210,12 +300,14 @@ function setupScanIPC(ipcMain) {
       function(progress) {
         if (!sender.isDestroyed()) {
           sender.send('scan:progress', progress);
-          if (progress.finished)
-            sender.send('scan:done', { filesFound:progress.filesFound });
+          if (progress.finished) {
+            appendLog('INFO scan:done (native) — files found: ' + (progress.filesFound || 0));
+            sender.send('scan:done', { filesFound: progress.filesFound });
+          }
         }
       }
     );
-    return { started:true };
+    return { started: true };
   });
 
   ipcMain.handle('scan:recover', async function(_, devicePath, file, outputDir) {
@@ -280,38 +372,6 @@ function setupScanIPC(ipcMain) {
       label:'Repaired (basic)' });
     return { success:recoveryOk, outputPath:destPath, health:nh2, repaired:recoveryOk };
   });
-}
-
-function simulateScan(event) {
-  var sender  = event.sender;
-  var count   = 0;
-  var exts    = ['jpg','png','mp4','pdf','docx','mp3','xlsx','mov','psd','zip','png','jpg'];
-  var typeMap = { jpg:1,png:1,psd:1,mp4:2,mov:2,mp3:3,pdf:4,docx:4,xlsx:4,zip:5 };
-  var stats   = [0,0,1,1,1,2,3];
-  var iv = setInterval(function() {
-    if (sender.isDestroyed()) { clearInterval(iv); return; }
-    if (count >= 312) {
-      clearInterval(iv);
-      sender.send('scan:progress', { percent:100, finished:true, filesFound:312 });
-      sender.send('scan:done', { filesFound:312 });
-      return;
-    }
-    var ext = exts[count % exts.length];
-    var st  = stats[count % stats.length];
-    var c   = parseFloat((0.45 + Math.random() * 0.55).toFixed(2));
-    var f   = { id:count, name:'file_' + count + '.' + ext, extension:ext,
-      size:Math.floor(Math.random() * 80000000) + 5000, type:typeMap[ext] || 6,
-      status:st, confidence:c, recoverable:true, path:'', fs:1, mft_ref:4096 + count };
-    f.health = computeHealth(f, count);
-    sender.send('scan:file-found', f);
-    sender.send('scan:progress', {
-      percent:Math.round((count / 312) * 100), finished:false,
-      filesFound:count + 1, filesRecoverable:count + 1,
-      sectorsTotal:1000000, sectorsScanned:Math.round((count / 312) * 1000000),
-      currentPath:'Scanning cluster ' + count + '...'
-    });
-    count++;
-  }, 40);
 }
 
 module.exports = { setupScanIPC:setupScanIPC, setupDriveWatcher:setupDriveWatcher };
