@@ -335,6 +335,25 @@ function setupScanIPC(ipcMain) {
     return computeHealth(file, file.id);
   });
 
+  ipcMain.handle('scan:preview-file', async function(_, filePath, maxBytes) {
+    if (!filePath) return { success:false, message:'Missing file path' };
+    if (!nativeAddon) {
+      try {
+        return await runPythonJson('preview', ['--file', String(filePath), '--max-bytes', String(maxBytes || 65536)]);
+      } catch(e) {
+        return { success:false, message:e.message };
+      }
+    }
+    try {
+      var sz = Math.min(Math.max(maxBytes || 65536, 1024), 524288);
+      var b  = fss.readFileSync(filePath);
+      var h  = b.subarray(0, sz).toString('base64');
+      return { success:true, kind:'binary', name:path.basename(filePath), size:b.length, head_b64:h, bytes:Math.min(sz, b.length) };
+    } catch(e) {
+      return { success:false, message:e.message };
+    }
+  });
+
   ipcMain.handle('scan:repair-file', async function(event, args) {
     var file = args.file, outputDir = args.outputDir, mode = args.mode;
     if (!nativeAddon) {
@@ -377,7 +396,8 @@ function setupScanIPC(ipcMain) {
       } catch(e) { appendLog('WARN AI image repair: ' + e.message); }
     }
     // ── Audio repair via AI server ────────────────────────────────────────
-    if ((file.ext === 'mp3' || file.ext === 'wav') && (file.path || destPath)) {
+    var ext = (file.extension || file.ext || '').toLowerCase();
+    if ((ext === 'mp3' || ext === 'wav') && (file.path || destPath)) {
       try {
         var _aiProc = require('../ai_process');
         var FormData = require('form-data');
@@ -400,7 +420,7 @@ function setupScanIPC(ipcMain) {
     }
     // ── Document repair via AI server ─────────────────────────────────────
     var docExts = ['docx','xlsx','pptx','odt','ods','pdf'];
-    if (docExts.indexOf(file.ext || '') >= 0 && (file.path || destPath)) {
+    if (docExts.indexOf(ext) >= 0 && (file.path || destPath)) {
       try {
         var _aiProc = require('../ai_process');
         var FormData = require('form-data');

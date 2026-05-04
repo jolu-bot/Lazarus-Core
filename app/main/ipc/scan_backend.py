@@ -1,127 +1,191 @@
-﻿#!/usr/bin/env python3
-"""Lazarus Core - Real scan backend
-Moteurs (ordre de priorité):
-  1. PhotoRec wrapper   (binaire trouvé dans resources/bin/ ou PATH)
-  2. Python raw carver  (lecture secteur/secteur - nécessite admin)
-  3. Logical scan       (Recycle Bin, shadow copies - toujours dispo)
-"""
-import argparse, json, os, random, struct, subprocess, sys, time, zlib
+#!/usr/bin/env python3
+"""Lazarus Core - scan backend (real engines only)."""
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import random
+import shutil
+import struct
+import subprocess
+import sys
+import time
+import zlib
 from collections import defaultdict
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
-# ── Signatures de fichiers ────────────────────────────────────────────────────
-# (ext, header_bytes, footer_bytes|None, max_size_bytes, type_id)
+SECTOR = 512
+READ_CHUNK = 512 * 1024
+MIN_FILE = 128
+
+# (ext, header, footer|None, max_size, type_id)
 SIGS = [
-    ('jpg',  b'\xff\xd8\xff\xe0', b'\xff\xd9',              20*1024*1024,  1),
-    ('jpg',  b'\xff\xd8\xff\xe1', b'\xff\xd9',              20*1024*1024,  1),
-    ('jpg',  b'\xff\xd8\xff\xdb', b'\xff\xd9',              20*1024*1024,  1),
-    ('jpg',  b'\xff\xd8\xff\xee', b'\xff\xd9',              20*1024*1024,  1),
-    ('png',  b'\x89PNG\r\n\x1a\n', b'IEND\xaeB`\x82',      50*1024*1024,  1),
-    ('gif',  b'GIF87a',            b'\x00;',                10*1024*1024,  1),
-    ('gif',  b'GIF89a',            b'\x00;',                10*1024*1024,  1),
-    ('bmp',  b'BM',                None,                    50*1024*1024,  1),
-    ('psd',  b'8BPS',              None,                   200*1024*1024,  1),
-    ('pdf',  b'%PDF-',             b'%%EOF',               500*1024*1024,  4),
-    ('zip',  b'PK\x03\x04',        b'PK\x05\x06',         200*1024*1024,  5),
-    ('docx', b'PK\x03\x04\x14\x00\x06\x00', b'PK\x05\x06', 100*1024*1024, 4),
-    ('xlsx', b'PK\x03\x04\x14\x00\x06\x00', b'PK\x05\x06', 100*1024*1024, 4),
-    ('mp3',  b'ID3',               None,                    50*1024*1024,  3),
-    ('mp3',  b'\xff\xfb',          None,                    20*1024*1024,  3),
-    ('mp3',  b'\xff\xf3',          None,                    20*1024*1024,  3),
-    ('wav',  b'RIFF',              None,                   500*1024*1024,  3),
-    ('avi',  b'RIFF',              None,                  2000*1024*1024,  2),
-    ('mp4',  b'\x00\x00\x00\x18ftyp', None,              2000*1024*1024,  2),
-    ('mp4',  b'\x00\x00\x00\x20ftyp', None,              2000*1024*1024,  2),
-    ('mov',  b'\x00\x00\x00\x14ftyp', None,              2000*1024*1024,  2),
-    ('wmv',  b'\x30\x26\xb2\x75',  None,                 2000*1024*1024,  2),
-    ('xls',  b'\xd0\xcf\x11\xe0',  None,                  100*1024*1024,  4),
-    ('doc',  b'\xd0\xcf\x11\xe0',  None,                  100*1024*1024,  4),
-    ('exe',  b'MZ',                None,                   100*1024*1024,  6),
-    ('7z',   b'7z\xbc\xaf\'\'',    None,                  500*1024*1024,  5),
-    ('rar',  b'Rar!\x1a\x07',      None,                  500*1024*1024,  5),
-    ('sqlite', b'SQLite format 3', None,                  100*1024*1024,  6),
+    ('jpg', b'\xff\xd8\xff\xe0', b'\xff\xd9', 50 * 1024 * 1024, 1),
+    ('jpg', b'\xff\xd8\xff\xe1', b'\xff\xd9', 50 * 1024 * 1024, 1),
+    ('jpg', b'\xff\xd8\xff\xdb', b'\xff\xd9', 50 * 1024 * 1024, 1),
+    ('jpg', b'\xff\xd8\xff\xee', b'\xff\xd9', 50 * 1024 * 1024, 1),
+    ('png', b'\x89PNG\r\n\x1a\n', b'IEND\xaeB`\x82', 100 * 1024 * 1024, 1),
+    ('gif', b'GIF87a', b'\x00;', 30 * 1024 * 1024, 1),
+    ('gif', b'GIF89a', b'\x00;', 30 * 1024 * 1024, 1),
+    ('bmp', b'BM', None, 150 * 1024 * 1024, 1),
+    ('tif', b'II*\x00', None, 200 * 1024 * 1024, 1),
+    ('tif', b'MM\x00*', None, 200 * 1024 * 1024, 1),
+    ('webp', b'RIFF', b'WEBP', 120 * 1024 * 1024, 1),
+    ('psd', b'8BPS', None, 600 * 1024 * 1024, 1),
+    ('pdf', b'%PDF-', b'%%EOF', 800 * 1024 * 1024, 4),
+    ('zip', b'PK\x03\x04', b'PK\x05\x06', 600 * 1024 * 1024, 5),
+    ('docx', b'PK\x03\x04\x14\x00\x06\x00', b'PK\x05\x06', 300 * 1024 * 1024, 4),
+    ('xlsx', b'PK\x03\x04\x14\x00\x06\x00', b'PK\x05\x06', 300 * 1024 * 1024, 4),
+    ('pptx', b'PK\x03\x04\x14\x00\x06\x00', b'PK\x05\x06', 400 * 1024 * 1024, 4),
+    ('odt', b'PK\x03\x04', b'PK\x05\x06', 250 * 1024 * 1024, 4),
+    ('ods', b'PK\x03\x04', b'PK\x05\x06', 250 * 1024 * 1024, 4),
+    ('odp', b'PK\x03\x04', b'PK\x05\x06', 300 * 1024 * 1024, 4),
+    ('sqlite', b'SQLite format 3', None, 400 * 1024 * 1024, 6),
+    ('mp3', b'ID3', None, 200 * 1024 * 1024, 3),
+    ('mp3', b'\xff\xfb', None, 200 * 1024 * 1024, 3),
+    ('mp3', b'\xff\xf3', None, 200 * 1024 * 1024, 3),
+    ('wav', b'RIFF', None, 2 * 1024 * 1024 * 1024, 3),
+    ('flac', b'fLaC', None, 500 * 1024 * 1024, 3),
+    ('ogg', b'OggS', None, 500 * 1024 * 1024, 3),
+    ('m4a', b'\x00\x00\x00\x20ftypM4A', None, 2 * 1024 * 1024 * 1024, 3),
+    ('aac', b'\xff\xf1', None, 400 * 1024 * 1024, 3),
+    ('aac', b'\xff\xf9', None, 400 * 1024 * 1024, 3),
+    ('avi', b'RIFF', b'AVI ', 4 * 1024 * 1024 * 1024, 2),
+    ('mp4', b'\x00\x00\x00\x18ftyp', None, 4 * 1024 * 1024 * 1024, 2),
+    ('mp4', b'\x00\x00\x00\x20ftyp', None, 4 * 1024 * 1024 * 1024, 2),
+    ('mov', b'\x00\x00\x00\x14ftyp', None, 4 * 1024 * 1024 * 1024, 2),
+    ('3gp', b'\x00\x00\x00\x14ftyp3g', None, 3 * 1024 * 1024 * 1024, 2),
+    ('mkv', b'\x1a\x45\xdf\xa3', None, 4 * 1024 * 1024 * 1024, 2),
+    ('flv', b'FLV\x01', None, 2 * 1024 * 1024 * 1024, 2),
+    ('wmv', b'\x30\x26\xb2\x75\x8e\x66\xcf\x11', None, 3 * 1024 * 1024 * 1024, 2),
+    ('zip', b'PK\x07\x08', None, 600 * 1024 * 1024, 5),
+    ('7z', b'7z\xbc\xaf\x27\x1c', None, 2 * 1024 * 1024 * 1024, 5),
+    ('rar', b'Rar!\x1a\x07\x00', None, 2 * 1024 * 1024 * 1024, 5),
+    ('rar', b'Rar!\x1a\x07\x01\x00', None, 2 * 1024 * 1024 * 1024, 5),
+    ('gz', b'\x1f\x8b\x08', None, 300 * 1024 * 1024, 5),
+    ('bz2', b'BZh', None, 300 * 1024 * 1024, 5),
+    ('xz', b'\xfd7zXZ\x00', None, 800 * 1024 * 1024, 5),
+    ('cab', b'MSCF', None, 800 * 1024 * 1024, 5),
+    ('iso', b'CD001', None, 4 * 1024 * 1024 * 1024, 5),
+    ('exe', b'MZ', None, 400 * 1024 * 1024, 6),
+    ('dll', b'MZ', None, 400 * 1024 * 1024, 6),
+    ('class', b'\xca\xfe\xba\xbe', None, 10 * 1024 * 1024, 6),
+    ('ttf', b'\x00\x01\x00\x00', None, 50 * 1024 * 1024, 6),
+    ('otf', b'OTTO', None, 50 * 1024 * 1024, 6),
+    ('woff', b'wOFF', None, 30 * 1024 * 1024, 6),
+    ('woff2', b'wOF2', None, 30 * 1024 * 1024, 6),
+    ('cr2', b'II*\x00\x10\x00\x00\x00CR', None, 200 * 1024 * 1024, 1),
+    ('nef', b'MM\x00*', None, 200 * 1024 * 1024, 1),
+    ('arw', b'II*\x00', None, 200 * 1024 * 1024, 1),
 ]
 
-_SIG_INDEX = defaultdict(list)
-for _s in SIGS:
-    _SIG_INDEX[_s[1][:4]].append(_s)
+TYPE_MAP = {
+    'jpg': 1, 'jpeg': 1, 'png': 1, 'gif': 1, 'bmp': 1, 'tif': 1, 'webp': 1, 'psd': 1,
+    'mp4': 2, 'avi': 2, 'mov': 2, 'wmv': 2, 'mkv': 2, '3gp': 2, 'flv': 2,
+    'mp3': 3, 'wav': 3, 'flac': 3, 'aac': 3, 'ogg': 3, 'm4a': 3,
+    'pdf': 4, 'doc': 4, 'docx': 4, 'xls': 4, 'xlsx': 4, 'ppt': 4, 'pptx': 4, 'odt': 4, 'ods': 4, 'odp': 4,
+    'zip': 5, 'rar': 5, '7z': 5, 'gz': 5, 'tar': 5, 'bz2': 5, 'xz': 5, 'cab': 5, 'iso': 5,
+}
 
-SECTOR    = 512
-READ_CHUNK = 512 * 1024   # 512 KB par lecture
-MIN_FILE   = 128          # octets minimum pour valider un fichier
+_SIG_INDEX: Dict[bytes, List[Tuple[str, bytes, Optional[bytes], int, int]]] = defaultdict(list)
+for sig in SIGS:
+    _SIG_INDEX[sig[1][:4]].append(sig)
 
-TYPE_MAP = {'jpg':1,'png':1,'gif':1,'bmp':1,'psd':1,'jpeg':1,
-            'mp4':2,'avi':2,'mov':2,'wmv':2,'mkv':2,
-            'mp3':3,'wav':3,'flac':3,'aac':3,
-            'pdf':4,'doc':4,'docx':4,'xls':4,'xlsx':4,
-            'zip':5,'rar':5,'7z':5,'gz':5,'tar':5}
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def emit(event, data):
+def emit(event: str, data: dict):
     print(json.dumps({'event': event, 'data': data}), flush=True)
 
-def log_err(msg):
+
+def log_err(msg: str):
     print('[LAZARUS] ' + msg, file=sys.stderr, flush=True)
 
-def type_for_ext(ext):
+
+def type_for_ext(ext: str) -> int:
     return TYPE_MAP.get((ext or '').lower(), 6)
 
-def compute_health(f, seed):
-    conf = float(f.get('confidence') or 0)
-    st   = int(f.get('status') or 0)
-    score = round(conf * 100)
-    if st == 1: score = min(score, 93)
-    if st == 2: score = min(score, 74)
-    if st == 3: score = min(score, 56)
-    rm = 0 if score >= 85 else 1 if score >= 70 else 2 if score >= 50 else 3
-    labels = ['Excellent','Good - minor repair','Degraded - repair needed','Critical - reconstruct']
-    return {'score':score,'headerOk':conf>=0.65,'structPct':100 if st==0 else int(conf*80),
-            'dataPct':100 if st==0 else int(conf*85),'frags':1 if st==0 else 2,
-            'repairMode':rm,'label':labels[rm],'existsOnDisk':st==0}
 
-# ── Drives ────────────────────────────────────────────────────────────────────
-def get_mock_drives():
+def compute_health(f: dict, seed: int) -> dict:
+    conf = float(f.get('confidence') or 0)
+    st = int(f.get('status') or 0)
+    score = round(conf * 100)
+    if st == 1:
+        score = min(score, 93)
+    if st == 2:
+        score = min(score, 74)
+    if st == 3:
+        score = min(score, 56)
+    rm = 0 if score >= 85 else 1 if score >= 70 else 2 if score >= 50 else 3
+    labels = ['Excellent', 'Good - minor repair', 'Degraded - repair needed', 'Critical - reconstruct']
+    return {
+        'score': score,
+        'headerOk': conf >= 0.65,
+        'structPct': 100 if st == 0 else int(conf * 80),
+        'dataPct': 100 if st == 0 else int(conf * 85),
+        'frags': 1 if st == 0 else 2,
+        'repairMode': rm,
+        'label': labels[rm],
+        'existsOnDisk': st == 0,
+    }
+
+
+def get_mock_drives() -> List[dict]:
     if os.name == 'nt':
         return [
-            {'path': r'\\.\PhysicalDrive0','label':'System Disk (Drive 0)','model':'Local Disk',
-             'serial':'','interface':'SATA','totalSize':500107862016,'sectorSize':512,'fs':'NTFS'},
-            {'path': r'\\.\PhysicalDrive1','label':'External (Drive 1)','model':'External',
-             'serial':'','interface':'USB','totalSize':1000204886016,'sectorSize':512,'fs':'NTFS'},
+            {'path': r'\\.\PhysicalDrive0', 'label': 'System Disk (Drive 0)', 'model': 'Local Disk',
+             'serial': '', 'interface': 'SATA', 'totalSize': 500107862016, 'sectorSize': 512, 'fs': 'NTFS'},
+            {'path': r'\\.\PhysicalDrive1', 'label': 'External (Drive 1)', 'model': 'External',
+             'serial': '', 'interface': 'USB', 'totalSize': 1000204886016, 'sectorSize': 512, 'fs': 'NTFS'},
         ]
-    return [{'path':'/dev/sda','label':'sda - Local Disk','model':'sda','serial':'',
-             'interface':'SATA','totalSize':500107862016,'sectorSize':512,'fs':'EXT4'}]
+    return [{'path': '/dev/sda', 'label': 'sda - Local Disk', 'model': 'sda', 'serial': '', 'interface': 'SATA',
+             'totalSize': 500107862016, 'sectorSize': 512, 'fs': 'EXT4'}]
 
-def enumerate_drives():
+
+def enumerate_drives() -> List[dict]:
     if os.name != 'nt':
         return get_mock_drives()
     try:
         out = subprocess.check_output(
             'wmic diskdrive get DeviceID,Model,Size,InterfaceType,SerialNumber /format:csv',
-            shell=True, text=True, timeout=4, encoding='utf-8', errors='ignore')
+            shell=True,
+            text=True,
+            timeout=4,
+            encoding='utf-8',
+            errors='ignore',
+        )
     except Exception:
         return get_mock_drives()
+
     drives = []
     for line in out.splitlines():
         line = line.strip()
-        if not line or line.startswith('Node'): continue
+        if not line or line.startswith('Node'):
+            continue
         p = [x.strip() for x in line.split(',')]
-        if len(p) < 6: continue
-        dev, model, serial, size_s, iface = p[2], p[3], p[4], p[5], p[1]
-        if not dev or dev == 'DeviceID': continue
-        try:   size_n = int(size_s)
-        except: size_n = 0
+        if len(p) < 6:
+            continue
+        dev, iface, model, serial, size_s = p[1], p[2], p[3], p[4], p[5]
+        if not dev or dev == 'DeviceID':
+            continue
+        try:
+            size_n = int(size_s)
+        except Exception:
+            size_n = 0
         label = model or dev
         if serial and serial != 'SerialNumber' and len(serial) > 2:
-            label = f"{model} ({serial[-8:]})"
-        drives.append({'path':dev,'label':label,'model':model,'serial':serial,
-            'interface':'' if iface=='InterfaceType' else iface,
-            'totalSize':size_n,'sectorSize':512,'fs':'NTFS'})
+            label = f'{model} ({serial[-8:]})'
+        drives.append({'path': dev, 'label': label, 'model': model, 'serial': serial,
+                      'interface': '' if iface == 'InterfaceType' else iface,
+                      'totalSize': size_n, 'sectorSize': 512, 'fs': 'NTFS'})
     return drives or get_mock_drives()
 
-# ── Moteur 1 : PhotoRec wrapper ───────────────────────────────────────────────
+
 PHOTOREC_BINS = ['photorec_win.exe', 'photorec.exe', 'photorec']
 
-def find_photorec():
+
+def find_photorec() -> Optional[str]:
     base = Path(__file__).parent
     for name in PHOTOREC_BINS:
         for d in [base, base / 'bin', base / '../resources/bin', base / '../../resources/bin']:
@@ -137,93 +201,109 @@ def find_photorec():
             pass
     return None
 
-def run_photorec(exe, device_path, out_dir):
+
+def run_photorec(exe: str, device_path: str, out_dir: str):
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    # Mode non-interactif : scan tout, dump dans out_dir
     cmd = [exe, '/log', '/d', str(out_path), '/cmd', device_path, 'search']
-    log_err(f'PhotoRec cmd: {" ".join(cmd)}')
+    log_err('PhotoRec cmd: ' + ' '.join(cmd))
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, encoding='utf-8', errors='ignore')
     file_id = 0
     seen = set()
+
     while proc.poll() is None:
         try:
             for p in out_path.rglob('*'):
                 key = str(p)
-                if key in seen or not p.is_file(): continue
+                if key in seen or not p.is_file():
+                    continue
                 seen.add(key)
                 ext = p.suffix.lstrip('.').lower() or 'bin'
-                sz  = p.stat().st_size
+                sz = p.stat().st_size
                 conf = round(0.75 + random.random() * 0.25, 2)
-                f = {'id':file_id,'name':p.name,'extension':ext,'size':sz,
-                     'type':type_for_ext(ext),'status':0,'confidence':conf,
-                     'recoverable':True,'path':str(p),'outputPath':str(p),
-                     'fs':1,'mft_ref':4096+file_id,'source':'photorec'}
+                f = {
+                    'id': file_id, 'name': p.name, 'extension': ext, 'size': sz,
+                    'type': type_for_ext(ext), 'status': 0, 'confidence': conf,
+                    'recoverable': True, 'path': str(p), 'outputPath': str(p),
+                    'fs': 1, 'mft_ref': 4096 + file_id, 'source': 'photorec',
+                }
                 f['health'] = compute_health(f, file_id)
                 emit('file-found', f)
-                emit('progress',{'percent':min(99,file_id),'finished':False,
-                                 'filesFound':file_id+1,'currentPath':str(p.parent),'engine':'photorec'})
+                emit('progress', {'percent': min(99, file_id), 'finished': False,
+                                  'filesFound': file_id + 1, 'currentPath': str(p.parent), 'engine': 'photorec'})
                 file_id += 1
-        except Exception: pass
+        except Exception:
+            pass
         time.sleep(0.5)
-    # Derniers fichiers après fermeture
+
     for p in out_path.rglob('*'):
         key = str(p)
-        if key in seen or not p.is_file(): continue
+        if key in seen or not p.is_file():
+            continue
         seen.add(key)
         ext = p.suffix.lstrip('.').lower() or 'bin'
-        sz  = p.stat().st_size
+        sz = p.stat().st_size
         conf = round(0.75 + random.random() * 0.25, 2)
-        f = {'id':file_id,'name':p.name,'extension':ext,'size':sz,
-             'type':type_for_ext(ext),'status':0,'confidence':conf,
-             'recoverable':True,'path':str(p),'outputPath':str(p),
-             'fs':1,'mft_ref':4096+file_id,'source':'photorec'}
+        f = {
+            'id': file_id, 'name': p.name, 'extension': ext, 'size': sz,
+            'type': type_for_ext(ext), 'status': 0, 'confidence': conf,
+            'recoverable': True, 'path': str(p), 'outputPath': str(p),
+            'fs': 1, 'mft_ref': 4096 + file_id, 'source': 'photorec',
+        }
         f['health'] = compute_health(f, file_id)
         emit('file-found', f)
         file_id += 1
-    emit('progress',{'percent':100,'finished':True,'filesFound':file_id})
-    emit('done',{'filesFound':file_id,'engine':'photorec'})
 
-# ── Moteur 2 : Python raw carver ─────────────────────────────────────────────
-def open_raw_device(device_path):
-    """Ouvre un device en lecture brute. Retourne (fh, error_str|None)."""
+    emit('progress', {'percent': 100, 'finished': True, 'filesFound': file_id})
+    emit('done', {'filesFound': file_id, 'engine': 'photorec'})
+
+
+def open_raw_device(device_path: str):
     try:
         if os.name == 'nt':
-            import msvcrt, ctypes
-            GENERIC_READ      = 0x80000000
-            FILE_SHARE_READ   = 0x00000001
-            FILE_SHARE_WRITE  = 0x00000002
-            OPEN_EXISTING     = 3
+            import ctypes
+            import msvcrt
+
+            GENERIC_READ = 0x80000000
+            FILE_SHARE_READ = 0x00000001
+            FILE_SHARE_WRITE = 0x00000002
+            OPEN_EXISTING = 3
             h = ctypes.windll.kernel32.CreateFileW(
-                device_path, GENERIC_READ,
+                device_path,
+                GENERIC_READ,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None, OPEN_EXISTING, 0, None)
-            INVALID = ctypes.c_void_p(-1).value
-            if h == INVALID:
+                None,
+                OPEN_EXISTING,
+                0,
+                None,
+            )
+            invalid = ctypes.c_void_p(-1).value
+            if h == invalid:
                 err = ctypes.windll.kernel32.GetLastError()
-                return None, f'CreateFile failed (error {err}) — relancer en administrateur'
+                return None, f'CreateFile failed (error {err}) - run as administrator'
             fd = msvcrt.open_osfhandle(h, os.O_RDONLY | os.O_BINARY)
             return open(fd, 'rb'), None
-        else:
-            return open(device_path, 'rb'), None
+        return open(device_path, 'rb'), None
     except PermissionError:
-        return None, 'Accès refusé — relancer en administrateur'
+        return None, 'Access denied - run as administrator'
     except Exception as e:
         return None, str(e)
 
-def extract_carved_file(fh, abs_offset, ext, header, footer, max_sz, type_id, out_path, file_id):
-    """Extrait un fichier depuis abs_offset en streaming. Retourne True si réussi."""
+
+def extract_carved_file(fh, abs_offset: int, ext: str, header: bytes, footer: Optional[bytes],
+                        max_sz: int, type_id: int, out_path: Path, file_id: int) -> bool:
     save_pos = fh.seek(0, 1)
     fh.seek(abs_offset)
     out_file = out_path / f'carved_{file_id:06d}.{ext}'
     try:
         bytes_written = 0
-        footer_found  = False
+        footer_found = False
         with open(out_file, 'wb') as wf:
             while bytes_written < max_sz:
                 chunk = fh.read(min(65536, max_sz - bytes_written))
-                if not chunk: break
+                if not chunk:
+                    break
                 if footer:
                     fi = chunk.find(footer)
                     if fi != -1:
@@ -233,198 +313,466 @@ def extract_carved_file(fh, abs_offset, ext, header, footer, max_sz, type_id, ou
                         break
                 wf.write(chunk)
                 bytes_written += len(chunk)
+
         if bytes_written < MIN_FILE:
             out_file.unlink(missing_ok=True)
             fh.seek(save_pos)
             return False
-        conf   = round(0.70 + random.random() * 0.30, 2) if (not footer or footer_found) else round(0.35 + random.random() * 0.25, 2)
+
+        conf = round(0.70 + random.random() * 0.30, 2) if (not footer or footer_found) else round(0.35 + random.random() * 0.25, 2)
         status = 0 if (not footer or footer_found) else 2
-        f = {'id':file_id,'name':out_file.name,'extension':ext,'size':bytes_written,
-             'type':type_id,'status':status,'confidence':conf,'recoverable':True,
-             'path':str(out_file),'outputPath':str(out_file),
-             'fs':1,'mft_ref':4096+file_id,'source':'raw_carve'}
+        f = {
+            'id': file_id, 'name': out_file.name, 'extension': ext, 'size': bytes_written,
+            'type': type_id, 'status': status, 'confidence': conf, 'recoverable': True,
+            'path': str(out_file), 'outputPath': str(out_file), 'fs': 1,
+            'mft_ref': 4096 + file_id, 'source': 'raw_carve',
+        }
         f['health'] = compute_health(f, file_id)
         emit('file-found', f)
         fh.seek(save_pos)
         return True
     except Exception as e:
         log_err(f'Extract error at offset {abs_offset}: {e}')
-        try: out_file.unlink(missing_ok=True)
-        except: pass
+        try:
+            out_file.unlink(missing_ok=True)
+        except Exception:
+            pass
         fh.seek(save_pos)
         return False
 
-def run_raw_carver(fh, out_path):
+
+def run_raw_carver(fh, out_path: Path, start_id: int = 0) -> int:
     try:
-        fh.seek(0, 2); total_size = fh.tell(); fh.seek(0)
-    except: total_size = 0
-    file_id   = 0
-    offset    = 0
-    OVERLAP   = max(max(len(s[1]) for s in SIGS), 32)
+        fh.seek(0, 2)
+        total_size = fh.tell()
+        fh.seek(0)
+    except Exception:
+        total_size = 0
+
+    file_id = start_id
+    offset = 0
+    overlap = max(max(len(s[1]) for s in SIGS), 32)
     prev_tail = b''
+
     while True:
         block = fh.read(READ_CHUNK)
-        if not block: break
-        window  = prev_tail + block
+        if not block:
+            break
+        window = prev_tail + block
         w_start = offset - len(prev_tail)
-        for i in range(len(window) - 4):
-            key = window[i:i+4]
-            if key not in _SIG_INDEX: continue
-            for (ext, header, footer, max_sz, type_id) in _SIG_INDEX[key]:
-                if window[i:i+len(header)] != header: continue
+        wlen = len(window)
+
+        for i in range(max(0, wlen - 4)):
+            key = window[i:i + 4]
+            if key not in _SIG_INDEX:
+                continue
+            for ext, header, footer, max_sz, type_id in _SIG_INDEX[key]:
+                if window[i:i + len(header)] != header:
+                    continue
                 abs_off = w_start + i
+                if abs_off < 0:
+                    continue
                 if extract_carved_file(fh, abs_off, ext, header, footer, max_sz, type_id, out_path, file_id):
                     file_id += 1
-        offset += len(block)
-        prev_tail = block[-OVERLAP:]
-        pct = min(99, int((offset / total_size) * 100)) if total_size else 0
-        emit('progress',{'percent':pct,'finished':False,'filesFound':file_id,
-                         'filesRecoverable':file_id,
-                         'sectorsTotal':total_size//SECTOR if total_size else 0,
-                         'sectorsScanned':offset//SECTOR,
-                         'currentPath':f'Offset {offset//(1024*1024)} MB / {total_size//(1024*1024)} MB',
-                         'engine':'raw_carve'})
-    fh.close()
-    emit('progress',{'percent':100,'finished':True,'filesFound':file_id})
-    emit('done',{'filesFound':file_id,'engine':'raw_carve'})
 
-# ── Moteur 3 : Logical scan ───────────────────────────────────────────────────
-def run_logical_scan(out_path):
+        offset += len(block)
+        prev_tail = block[-overlap:]
+        pct = min(99, int((offset / total_size) * 100)) if total_size else 0
+        emit('progress', {'percent': pct, 'finished': False, 'filesFound': file_id - start_id,
+                          'filesRecoverable': file_id - start_id,
+                          'sectorsTotal': total_size // SECTOR if total_size else 0,
+                          'sectorsScanned': offset // SECTOR,
+                          'currentPath': f'Offset {offset // (1024 * 1024)} MB / {total_size // (1024 * 1024)} MB',
+                          'engine': 'raw_carve'})
+
+    fh.close()
+    emit('progress', {'percent': 100, 'finished': True, 'filesFound': file_id - start_id})
+    emit('done', {'filesFound': file_id - start_id, 'engine': 'raw_carve'})
+    return file_id
+
+
+# -------------------- NTFS MFT scan --------------------
+def _open_volume(vol: str):
+    return open_raw_device('\\\\.\\' + vol)
+
+
+def _cluster_to_record_size(cpr: int, cluster_size: int) -> int:
+    if cpr < 0:
+        return 1 << (-cpr)
+    return cpr * cluster_size
+
+
+def _parse_ntfs_boot(bs: bytes):
+    if len(bs) < 90 or bs[3:11] != b'NTFS    ':
+        return None
+    bps = struct.unpack_from('<H', bs, 11)[0]
+    spc = bs[13]
+    mft_cluster = struct.unpack_from('<Q', bs, 48)[0]
+    cpr = struct.unpack_from('<b', bs, 64)[0]
+    if bps == 0 or spc == 0:
+        return None
+    cluster_size = bps * spc
+    rec_size = _cluster_to_record_size(cpr, cluster_size)
+    return bps, spc, mft_cluster, rec_size
+
+
+def _decode_filename_attr(buf: bytes) -> Tuple[str, int]:
+    if len(buf) < 66:
+        return '', 0
+    parent_ref = struct.unpack_from('<Q', buf, 0)[0] & 0x0000FFFFFFFFFFFF
+    name_len = buf[64]
+    name_off = 66
+    name = ''
+    if name_len > 0 and name_off + name_len * 2 <= len(buf):
+        try:
+            name = buf[name_off:name_off + name_len * 2].decode('utf-16le', errors='ignore')
+        except Exception:
+            name = ''
+    return name, int(parent_ref)
+
+
+def _read_runlist(data: bytes) -> List[Tuple[int, int]]:
+    runs: List[Tuple[int, int]] = []
+    i = 0
+    lcn = 0
+    while i < len(data):
+        hdr = data[i]
+        i += 1
+        if hdr == 0:
+            break
+        len_sz = hdr & 0x0F
+        off_sz = (hdr >> 4) & 0x0F
+        if i + len_sz + off_sz > len(data):
+            break
+        clen = int.from_bytes(data[i:i + len_sz], 'little', signed=False)
+        i += len_sz
+        coff = int.from_bytes(data[i:i + off_sz], 'little', signed=True)
+        i += off_sz
+        lcn += coff
+        runs.append((lcn, clen))
+    return runs
+
+
+def scan_ntfs_mft(max_records_per_volume: int = 40000) -> List[dict]:
+    if os.name != 'nt':
+        return []
+
+    found: List[dict] = []
+    for dl in 'CDEFGHIJKLMNOPQRSTUVWXYZ':
+        vol = dl + ':'
+        fh, err = _open_volume(vol)
+        if not fh:
+            continue
+        try:
+            boot = fh.read(512)
+            info = _parse_ntfs_boot(boot)
+            if not info:
+                fh.close()
+                continue
+            bps, spc, mft_cluster, rec_size = info
+            cluster_size = bps * spc
+            mft_off = mft_cluster * cluster_size
+
+            for rec_idx in range(max_records_per_volume):
+                off = mft_off + rec_idx * rec_size
+                fh.seek(off)
+                rec = fh.read(rec_size)
+                if len(rec) < 48:
+                    break
+                if rec[0:4] != b'FILE':
+                    continue
+
+                attr_off = struct.unpack_from('<H', rec, 20)[0]
+                flags = struct.unpack_from('<H', rec, 22)[0]
+                in_use = bool(flags & 0x0001)
+                is_dir = bool(flags & 0x0002)
+                if is_dir:
+                    continue
+
+                name = ''
+                parent_ref = 5
+                size = 0
+                p = attr_off
+                while p + 8 < len(rec):
+                    atype = struct.unpack_from('<I', rec, p)[0]
+                    if atype == 0xFFFFFFFF:
+                        break
+                    alen = struct.unpack_from('<I', rec, p + 4)[0]
+                    if alen <= 0 or p + alen > len(rec):
+                        break
+                    non_resident = rec[p + 8]
+                    if atype == 0x30 and non_resident == 0:
+                        vlen = struct.unpack_from('<I', rec, p + 16)[0]
+                        voff = struct.unpack_from('<H', rec, p + 20)[0]
+                        v = rec[p + voff:p + voff + vlen]
+                        nm, pref = _decode_filename_attr(v)
+                        if nm:
+                            name = nm
+                            parent_ref = pref
+                    elif atype == 0x80:
+                        if non_resident == 0:
+                            vlen = struct.unpack_from('<I', rec, p + 16)[0]
+                            size = max(size, int(vlen))
+                        else:
+                            alloc = struct.unpack_from('<Q', rec, p + 40)[0]
+                            real = struct.unpack_from('<Q', rec, p + 48)[0]
+                            size = max(size, int(real or alloc))
+                    p += alen
+
+                if not name:
+                    continue
+                ext = name.rsplit('.', 1)[-1].lower() if '.' in name else 'bin'
+                conf = 0.95 if not in_use else 0.72
+                status = 2 if not in_use else 1
+                f = {
+                    'id': len(found),
+                    'name': name,
+                    'extension': ext,
+                    'size': int(size),
+                    'type': type_for_ext(ext),
+                    'status': status,
+                    'confidence': conf,
+                    'recoverable': True,
+                    'path': vol + '\\' + name,
+                    'outputPath': '',
+                    'fs': 1,
+                    'mft_ref': rec_idx,
+                    'parent_ref': parent_ref,
+                    'source': 'ntfs_mft',
+                }
+                f['health'] = compute_health(f, len(found))
+                found.append(f)
+        except Exception as e:
+            log_err(f'MFT scan error on {vol}: {e}')
+        finally:
+            try:
+                fh.close()
+            except Exception:
+                pass
+    return found
+
+
+def run_logical_scan(out_path: Path, start_id: int = 0) -> int:
     sources = []
     if os.name == 'nt':
         for dl in 'CDEFGHIJKLMNOPQRSTUVWXYZ':
             rb = Path(f'{dl}:\\$Recycle.Bin')
-            if rb.exists(): sources.append(rb)
+            if rb.exists():
+                sources.append(rb)
         wo = Path('C:\\Windows.old')
-        if wo.exists(): sources.append(wo)
-        tmp = Path(os.environ.get('TEMP','C:\\Windows\\Temp'))
-        if tmp.exists(): sources.append(tmp)
+        if wo.exists():
+            sources.append(wo)
+        tmp = Path(os.environ.get('TEMP', 'C:\\Windows\\Temp'))
+        if tmp.exists():
+            sources.append(tmp)
     else:
-        sources += [Path.home()/'.local/share/Trash', Path('/tmp')]
-    file_id = 0
+        sources += [Path.home() / '.local/share/Trash', Path('/tmp')]
+
+    file_id = start_id
     for src in sources:
-        emit('progress',{'percent':min(99,file_id*2),'finished':False,'filesFound':file_id,
-                         'currentPath':str(src),'engine':'logical',
-                         'warning':'Admin rights not available — scanning accessible areas only'})
+        emit('progress', {'percent': min(99, (file_id - start_id) * 2), 'finished': False,
+                          'filesFound': file_id - start_id, 'currentPath': str(src), 'engine': 'logical'})
         try:
             for p in src.rglob('*'):
-                if not p.is_file(): continue
+                if not p.is_file():
+                    continue
                 try:
-                    sz  = p.stat().st_size
+                    sz = p.stat().st_size
                     ext = p.suffix.lstrip('.').lower() or 'bin'
-                    conf = round(0.5 + random.random() * 0.4, 2)
-                    f = {'id':file_id,'name':p.name,'extension':ext,'size':sz,
-                         'type':type_for_ext(ext),'status':1,'confidence':conf,
-                         'recoverable':True,'path':str(p),'outputPath':str(p),
-                         'fs':1,'mft_ref':4096+file_id,'source':'logical'}
+                    conf = round(0.50 + random.random() * 0.40, 2)
+                    f = {'id': file_id, 'name': p.name, 'extension': ext, 'size': sz,
+                         'type': type_for_ext(ext), 'status': 1, 'confidence': conf,
+                         'recoverable': True, 'path': str(p), 'outputPath': str(p),
+                         'fs': 1, 'mft_ref': 4096 + file_id, 'source': 'logical'}
                     f['health'] = compute_health(f, file_id)
                     emit('file-found', f)
-                    emit('progress',{'percent':min(99,file_id*2),'finished':False,
-                                     'filesFound':file_id+1,'currentPath':str(p.parent),'engine':'logical',
-                                     'warning':'Admin rights not available — scanning accessible areas only'})
                     file_id += 1
-                    time.sleep(0.01)
-                except Exception: pass
-        except Exception: pass
-    emit('progress',{'percent':100,'finished':True,'filesFound':file_id})
-    emit('done',{'filesFound':file_id,'engine':'logical'})
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
-# ── Dispatcher principal scan ─────────────────────────────────────────────────
-def cmd_scan(device_path, out_dir):
+    emit('progress', {'percent': 100, 'finished': True, 'filesFound': file_id - start_id})
+    emit('done', {'filesFound': file_id - start_id, 'engine': 'logical'})
+    return file_id
+
+
+def cmd_scan(device_path: str, out_dir: str):
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    # Moteur 1 : PhotoRec
     pr = find_photorec()
     if pr:
         log_err(f'Engine: PhotoRec ({pr})')
-        emit('progress',{'percent':0,'finished':False,'filesFound':0,
-                         'currentPath':'PhotoRec engine starting...','engine':'photorec'})
+        emit('progress', {'percent': 0, 'finished': False, 'filesFound': 0, 'currentPath': 'PhotoRec starting', 'engine': 'photorec'})
         run_photorec(pr, device_path, out_dir)
         return
 
-    # Moteur 2 : Raw carver
+    # Pre-pass: NTFS MFT metadata scan on Windows
+    pre_count = 0
+    if os.name == 'nt':
+        try:
+            mft_items = scan_ntfs_mft(max_records_per_volume=25000)
+            for i, f in enumerate(mft_items):
+                f['id'] = i
+                f['health'] = compute_health(f, i)
+                emit('file-found', f)
+            pre_count = len(mft_items)
+            if pre_count:
+                emit('progress', {'percent': 8, 'finished': False, 'filesFound': pre_count,
+                                  'currentPath': 'NTFS MFT parsed', 'engine': 'ntfs_mft'})
+        except Exception as e:
+            log_err(f'MFT pre-pass failed: {e}')
+
     fh, err = open_raw_device(device_path)
     if fh:
         log_err(f'Engine: Python raw carver on {device_path}')
-        emit('progress',{'percent':0,'finished':False,'filesFound':0,
-                         'currentPath':f'Raw carving {device_path}...','engine':'raw_carve'})
-        run_raw_carver(fh, out_path)
+        emit('progress', {'percent': 10 if pre_count else 0, 'finished': False, 'filesFound': pre_count,
+                          'currentPath': f'Raw carving {device_path}...', 'engine': 'raw_carve'})
+        run_raw_carver(fh, out_path, start_id=pre_count)
         return
 
-    # Moteur 3 : Logical scan
-    log_err(f'Engine: Logical scan (raw access denied: {err})')
-    emit('progress',{'percent':0,'finished':False,'filesFound':0,
-                     'currentPath':'No raw access — scanning logical drives...',
-                     'engine':'logical','warning':err})
-    run_logical_scan(out_path)
+    log_err(f'Engine: Logical scan (raw denied: {err})')
+    emit('progress', {'percent': 0, 'finished': False, 'filesFound': pre_count,
+                      'currentPath': 'No raw access - scanning logical areas', 'engine': 'logical', 'warning': err})
+    run_logical_scan(out_path, start_id=pre_count)
 
-# ── Recover réel ──────────────────────────────────────────────────────────────
-def cmd_recover(file_obj, out_dir):
-    out_path = Path(out_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
-    src = file_obj.get('outputPath') or file_obj.get('path') or ''
-    name = file_obj.get('name') or 'recovered_file'
-    dest = str(out_path / name)
-    success = False
-    if src and Path(src).exists():
+
+# -------------------- binary repair --------------------
+def repair_jpeg(data: bytes) -> bytes:
+    soi = data.find(b'\xff\xd8')
+    if soi < 0:
+        return data
+    out = data[soi:]
+    if not out.endswith(b'\xff\xd9'):
+        out += b'\xff\xd9'
+    return out
+
+
+def repair_png(data: bytes) -> bytes:
+    sig = b'\x89PNG\r\n\x1a\n'
+    i = data.find(sig)
+    if i < 0:
+        return data
+    pos = i + len(sig)
+    out = bytearray(sig)
+    while pos + 12 <= len(data):
         try:
-            import shutil
-            shutil.copy2(src, dest)
-            success = True
-        except Exception as e:
-            log_err(f'Copy error: {e}')
-    print(json.dumps({'success':success,'outputPath':dest,'health':file_obj.get('health')}))
+            clen = struct.unpack('>I', data[pos:pos + 4])[0]
+            ctyp = data[pos + 4:pos + 8]
+            cdat = data[pos + 8:pos + 8 + clen]
+            if pos + 12 + clen > len(data):
+                break
+            crc = zlib.crc32(ctyp)
+            crc = zlib.crc32(cdat, crc) & 0xFFFFFFFF
+            out += struct.pack('>I', clen) + ctyp + cdat + struct.pack('>I', crc)
+            pos += 12 + clen
+            if ctyp == b'IEND':
+                return bytes(out)
+        except Exception:
+            break
+    out += b'\x00\x00\x00\x00IEND\xaeB`\x82'
+    return bytes(out)
 
-# ── Repair réel ───────────────────────────────────────────────────────────────
-# =============================================================================
-# REAL BINARY REPAIR ENGINES - Lazarus Core v3.0
-# =============================================================================
-MPEG_BITRATES = {
-    (3, 3): [0,32,64,96,128,160,192,224,256,288,320,352,384,416,448,0],
-    (3, 2): [0,32,48,56,64,80,96,112,128,160,192,224,256,320,384,0],
-    (3, 1): [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0],
-    (2, 3): [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256,0],
-    (2, 2): [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0],
-    (2, 1): [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0],
-}
-MPEG_SAMPLERATES = {3: [44100,48000,32000,0], 2: [22050,24000,16000,0], 0: [11025,12000,8000,0]}
 
-def _mp3_frame_size(b0, b1, b2):
+def repair_pdf(data: bytes) -> bytes:
+    i = data.find(b'%PDF-')
+    if i < 0:
+        return data
+    out = data[i:]
+    eof = out.rfind(b'%%EOF')
+    if eof >= 0:
+        return out[:eof + 5]
+    return out + b'\n%%EOF\n'
+
+
+def repair_wav(data: bytes) -> bytes:
+    if len(data) < 44 or data[:4] != b'RIFF':
+        return data
+    out = bytearray(data)
+    struct.pack_into('<I', out, 4, len(out) - 8)
+    dpos = out.find(b'data')
+    if dpos >= 0 and dpos + 8 <= len(out):
+        struct.pack_into('<I', out, dpos + 4, len(out) - (dpos + 8))
+    return bytes(out)
+
+
+def _mp3_frame_size(b0: int, b1: int, b2: int) -> int:
     if b0 != 0xFF or (b1 & 0xE0) != 0xE0:
         return 0
-    mpeg_ver = (b1 >> 3) & 3
-    layer    = (b1 >> 1) & 3
-    br_idx   = (b2 >> 4) & 0xF
-    sr_idx   = (b2 >> 2) & 3
-    padding  = (b2 >> 1) & 1
-    if mpeg_ver == 1 or layer == 0 or br_idx in (0, 15) or sr_idx == 3:
+    ver = (b1 >> 3) & 0x03
+    layer = (b1 >> 1) & 0x03
+    br_i = (b2 >> 4) & 0x0F
+    sr_i = (b2 >> 2) & 0x03
+    pad = (b2 >> 1) & 0x01
+    if ver == 1 or layer == 0 or br_i in (0, 15) or sr_i == 3:
         return 0
-    br_table = MPEG_BITRATES.get((mpeg_ver, layer))
-    if not br_table:
-        return 0
-    br = br_table[br_idx] * 1000
-    sr = MPEG_SAMPLERATES.get(mpeg_ver, [44100, 48000, 32000, 0])[sr_idx]
+    br_tab = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0] if ver == 3 else [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0]
+    sr_tab = {3: [44100, 48000, 32000, 0], 2: [22050, 24000, 16000, 0], 0: [11025, 12000, 8000, 0]}.get(ver, [44100, 48000, 32000, 0])
+    br = br_tab[br_i] * 1000
+    sr = sr_tab[sr_i]
     if sr == 0:
         return 0
     if layer == 3:
-        return (12 * br // sr + padding) * 4
-    return 144 * br // sr + padding
+        return (12 * br // sr + pad) * 4
+    return 144 * br // sr + pad
 
-# ---- ZIP / DOCX / XLSX / PPTX (Central Directory reconstruction) ----
-def repair_zip(data):
-    LFH  = b'PK\x03\x04'
-    CDH  = b'PK\x01\x02'
-    EOCD = b'PK\x05\x06'
+
+def repair_mp3(data: bytes) -> bytes:
+    out = bytearray()
+    pos = 0
+    if data[:3] == b'ID3' and len(data) > 10:
+        sz = ((data[6] & 0x7F) << 21) | ((data[7] & 0x7F) << 14) | ((data[8] & 0x7F) << 7) | (data[9] & 0x7F)
+        total = sz + 10 + (10 if data[5] & 0x10 else 0)
+        out.extend(data[:total])
+        pos = total
+    frames = 0
+    while pos + 4 <= len(data):
+        fs = _mp3_frame_size(data[pos], data[pos + 1], data[pos + 2])
+        if fs <= 4 or pos + fs > len(data):
+            pos += 1
+            continue
+        out.extend(data[pos:pos + fs])
+        pos += fs
+        frames += 1
+    return bytes(out) if frames else data
+
+
+def repair_mp4(data: bytes) -> bytes:
+    pos = 0
+    atoms = []
+    while pos + 8 <= len(data):
+        size = struct.unpack('>I', data[pos:pos + 4])[0]
+        typ = data[pos + 4:pos + 8]
+        if size < 8 or pos + size > len(data):
+            break
+        atoms.append((typ, data[pos:pos + size]))
+        pos += size
+    if not atoms:
+        return data
+    moov = [a for t, a in atoms if t == b'moov']
+    rest = [a for t, a in atoms if t != b'moov']
+    return b''.join(moov + rest) if moov else data
+
+
+def repair_ole(data: bytes) -> bytes:
+    sig = b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'
+    i = data.find(sig)
+    return data[i:] if i >= 0 else data
+
+
+def repair_zip(data: bytes) -> bytes:
+    lfh = b'PK\x03\x04'
+    cdh = b'PK\x01\x02'
+    eocd = b'PK\x05\x06'
     entries = []
     pos = 0
     while pos < len(data):
-        idx = data.find(LFH, pos)
+        idx = data.find(lfh, pos)
         if idx == -1 or idx + 30 > len(data):
             break
         try:
-            ver, flags, comp, mtime, mdate, crc, csz, usz, fnlen, exlen = \
-                struct.unpack('<HHHHH III HH', data[idx+4:idx+30])
+            ver, flags, comp, mtime, mdate, crc, csz, usz, fnlen, exlen = struct.unpack('<HHHHHIIIHH', data[idx + 4:idx + 30])
         except struct.error:
             pos = idx + 4
             continue
@@ -433,74 +781,74 @@ def repair_zip(data):
         if fn_end > len(data):
             pos = idx + 4
             continue
-        fname = data[idx+30:fn_end]
+        fname = data[idx + 30:fn_end]
         extra = data[fn_end:ex_end] if ex_end <= len(data) else b''
         ds = ex_end
         if csz == 0 and not (flags & 0x8):
-            nxt = data.find(LFH, ds + 4)
+            nxt = data.find(lfh, ds + 4)
             csz = (nxt - ds) if nxt > ds else (len(data) - ds)
             usz = csz
-        fdata = data[ds:ds+csz] if ds+csz <= len(data) else data[ds:]
+        fdata = data[ds:ds + csz] if ds + csz <= len(data) else data[ds:]
         if comp == 0 and crc == 0 and fdata:
             crc = zlib.crc32(fdata) & 0xFFFFFFFF
-        entries.append({'flags':flags,'comp':comp,'mtime':mtime,'mdate':mdate,
-                        'crc':crc,'csz':len(fdata),'usz':usz,
-                        'fname':fname,'extra':extra,'data':fdata})
+        entries.append({'flags': flags, 'comp': comp, 'mtime': mtime, 'mdate': mdate,
+                        'crc': crc, 'csz': len(fdata), 'usz': usz,
+                        'fname': fname, 'extra': extra, 'data': fdata})
         pos = ds + len(fdata)
+
     if not entries:
         return data
+
     out = bytearray()
     offsets = []
     for e in entries:
         offsets.append(len(out))
-        out += LFH
+        out += lfh
         out += struct.pack('<HHHHH', 20, e['flags'], e['comp'], e['mtime'], e['mdate'])
-        out += struct.pack('<III',   e['crc'], e['csz'], e['usz'])
-        out += struct.pack('<HH',    len(e['fname']), len(e['extra']))
+        out += struct.pack('<III', e['crc'], e['csz'], e['usz'])
+        out += struct.pack('<HH', len(e['fname']), len(e['extra']))
         out += e['fname'] + e['extra'] + e['data']
+
     cd_off = len(out)
     for i, e in enumerate(entries):
-        out += CDH
-        out += struct.pack('<HH',   20, 20)
+        out += cdh
+        out += struct.pack('<HH', 20, 20)
         out += struct.pack('<HHHH', e['flags'], e['comp'], e['mtime'], e['mdate'])
-        out += struct.pack('<III',  e['crc'], e['csz'], e['usz'])
-        out += struct.pack('<HHH',  len(e['fname']), 0, 0)
-        out += struct.pack('<HH',   0, 0)
-        out += struct.pack('<II',   0, offsets[i])
+        out += struct.pack('<III', e['crc'], e['csz'], e['usz'])
+        out += struct.pack('<HHH', len(e['fname']), 0, 0)
+        out += struct.pack('<HH', 0, 0)
+        out += struct.pack('<II', 0, offsets[i])
         out += e['fname']
+
     cd_sz = len(out) - cd_off
-    out += EOCD
+    out += eocd
     out += struct.pack('<HHHH', 0, 0, len(entries), len(entries))
-    out += struct.pack('<II',   cd_sz, cd_off)
-    out += struct.pack('<H',    0)
+    out += struct.pack('<II', cd_sz, cd_off)
+    out += struct.pack('<H', 0)
     return bytes(out)
 
-# ---- Dispatch table ----
+
 REPAIR_FUNCS = {
-    'jpg':  repair_jpeg, 'jpeg': repair_jpeg,
-    'png':  repair_png,
-    'pdf':  repair_pdf,
-    'zip':  repair_zip,
-    'docx': repair_zip, 'xlsx': repair_zip, 'pptx': repair_zip,
-    'odt':  repair_zip, 'ods':  repair_zip, 'odp':  repair_zip,
-    'mp3':  repair_mp3,
-    'mp4':  repair_mp4, 'mov':  repair_mp4, 'm4v':  repair_mp4, 'm4a': repair_mp4,
-    'wav':  repair_wav,
-    'doc':  repair_ole, 'xls':  repair_ole, 'ppt':  repair_ole,
+    'jpg': repair_jpeg, 'jpeg': repair_jpeg,
+    'png': repair_png,
+    'pdf': repair_pdf,
+    'zip': repair_zip, 'docx': repair_zip, 'xlsx': repair_zip, 'pptx': repair_zip, 'odt': repair_zip, 'ods': repair_zip, 'odp': repair_zip,
+    'mp3': repair_mp3,
+    'mp4': repair_mp4, 'mov': repair_mp4, 'm4v': repair_mp4, 'm4a': repair_mp4,
+    'wav': repair_wav,
+    'doc': repair_ole, 'xls': repair_ole, 'ppt': repair_ole,
 }
 
 
-# ---- cmd_recover (real shutil copy) ----
-def cmd_recover(file_obj, out_dir):
+def cmd_recover(file_obj: dict, out_dir: str):
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    src  = file_obj.get('outputPath') or file_obj.get('path') or ''
+    src = file_obj.get('outputPath') or file_obj.get('path') or ''
     name = file_obj.get('name') or 'recovered_file'
     dest = str(out_path / name)
     success = False
     if src and Path(src).exists():
         try:
-            import shutil
             shutil.copy2(src, dest)
             success = True
         except Exception as e:
@@ -508,21 +856,22 @@ def cmd_recover(file_obj, out_dir):
     print(json.dumps({'success': success, 'outputPath': dest, 'health': file_obj.get('health')}))
 
 
-# ---- cmd_repair (real binary-level repair per format) ----
-def cmd_repair(args_obj):
-    file_obj  = args_obj.get('file') or {}
-    out_dir   = args_obj.get('outputDir') or str(Path.home() / 'LazarusRecovered')
-    out_path  = Path(out_dir)
+def cmd_repair(args_obj: dict):
+    file_obj = args_obj.get('file') or {}
+    out_dir = args_obj.get('outputDir') or str(Path.home() / 'LazarusRecovered')
+    out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    ext       = (file_obj.get('extension') or '').lower()
-    name      = 'repaired_' + (file_obj.get('name') or 'file')
-    dest      = out_path / name
-    src       = file_obj.get('outputPath') or file_obj.get('path') or ''
+
+    ext = (file_obj.get('extension') or '').lower()
+    name = 'repaired_' + (file_obj.get('name') or 'file')
+    dest = out_path / name
+    src = file_obj.get('outputPath') or file_obj.get('path') or ''
     repair_fn = REPAIR_FUNCS.get(ext)
-    repaired  = False
+    repaired = False
+
     if src and Path(src).exists() and repair_fn:
         try:
-            raw   = Path(src).read_bytes()
+            raw = Path(src).read_bytes()
             fixed = repair_fn(raw)
             dest.write_bytes(fixed)
             repaired = len(fixed) >= max(128, len(raw) // 2)
@@ -531,37 +880,74 @@ def cmd_repair(args_obj):
             log_err(f'Repair error [{ext}]: {e}')
     elif src and Path(src).exists():
         try:
-            import shutil
             shutil.copy2(src, str(dest))
             repaired = True
         except Exception:
             pass
-    h  = file_obj.get('health') or {}
+
+    h = file_obj.get('health') or {}
     nh = {
-        'score':      min(100, int(h.get('score')      or 50) + (25 if repaired else 0)),
-        'repairMode': max(0,   int(h.get('repairMode') or 0)  - (1  if repaired else 0)),
-        'label':      'Repaired' if repaired else 'Repair failed - file not accessible',
-        'headerOk':   True if repaired else bool(h.get('headerOk')),
+        'score': min(100, int(h.get('score') or 50) + (25 if repaired else 0)),
+        'repairMode': max(0, int(h.get('repairMode') or 0) - (1 if repaired else 0)),
+        'label': 'Repaired' if repaired else 'Repair failed - file not accessible',
+        'headerOk': True if repaired else bool(h.get('headerOk')),
     }
     print(json.dumps({'success': repaired, 'outputPath': str(dest), 'health': nh, 'repaired': repaired}))
 
 
-# ---- Entry point ----
+def cmd_preview(file_path: str, max_bytes: int):
+    p = Path(file_path)
+    if not p.exists() or not p.is_file():
+        print(json.dumps({'success': False, 'message': 'File not found'}))
+        return
+    max_bytes = max(1024, min(max_bytes, 512 * 1024))
+    raw = p.read_bytes()[:max_bytes]
+    ext = p.suffix.lstrip('.').lower()
+    kind = 'binary'
+    if ext in ('jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'tif', 'tiff'):
+        kind = 'image'
+    elif ext in ('pdf', 'doc', 'docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp'):
+        kind = 'document'
+    elif ext in ('mp3', 'wav', 'flac', 'ogg', 'aac', 'm4a'):
+        kind = 'audio'
+    elif ext in ('mp4', 'mov', 'avi', 'wmv', 'mkv', 'flv'):
+        kind = 'video'
+    print(json.dumps({
+        'success': True,
+        'kind': kind,
+        'name': p.name,
+        'size': p.stat().st_size,
+        'head_b64': base64.b64encode(raw).decode('ascii'),
+        'bytes': len(raw),
+    }))
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest='cmd', required=True)
+
     sub.add_parser('enumerate')
+
     p_scan = sub.add_parser('scan')
-    p_scan.add_argument('--device',     default=r'\\.\PhysicalDrive0')
+    p_scan.add_argument('--device', default=r'\\.\PhysicalDrive0')
     p_scan.add_argument('--output-dir', default=str(Path.home() / 'LazarusRecovered'))
+
     p_rec = sub.add_parser('recover')
-    p_rec.add_argument('--file-json',  required=True)
+    p_rec.add_argument('--file-json', required=True)
     p_rec.add_argument('--output-dir', default='')
+
     p_ana = sub.add_parser('analyze')
-    p_ana.add_argument('--file-json',  required=True)
+    p_ana.add_argument('--file-json', required=True)
+
     p_rep = sub.add_parser('repair')
-    p_rep.add_argument('--args-json',  required=True)
+    p_rep.add_argument('--args-json', required=True)
+
+    p_prev = sub.add_parser('preview')
+    p_prev.add_argument('--file', required=True)
+    p_prev.add_argument('--max-bytes', type=int, default=65536)
+
     args = parser.parse_args()
+
     if args.cmd == 'enumerate':
         print(json.dumps(enumerate_drives()))
     elif args.cmd == 'scan':
@@ -573,6 +959,9 @@ def main():
         print(json.dumps(compute_health(f, int(f.get('id') or 0))))
     elif args.cmd == 'repair':
         cmd_repair(json.loads(args.args_json))
+    elif args.cmd == 'preview':
+        cmd_preview(args.file, args.max_bytes)
+
 
 if __name__ == '__main__':
     main()

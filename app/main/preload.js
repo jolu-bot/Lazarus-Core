@@ -6,7 +6,7 @@ const VALID_INVOKE = new Set([
   'dialog:openFolder','dialog:saveFile','shell:openPath',
   'app:getVersion','app:getPlatform',
   'scan:start','scan:stop','scan:recover','scan:enumerate-drives',
-  'scan:analyze-health','scan:repair-file',
+  'scan:analyze-health','scan:repair-file','scan:preview-file',
   'license:validate','license:get','license:activate',
   'app:getSettings','app:setSettings','app:export-files',
   'history:get','history:clear',
