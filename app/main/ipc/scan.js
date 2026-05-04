@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 const path = require('path');
 const os   = require('os');
 const fss  = require('fs');
@@ -443,6 +443,45 @@ function setupScanIPC(ipcMain) {
     }
     return { success:recoveryOk, outputPath:destPath, health:file.health || {}, repaired:recoveryOk };
   });
+}
+
+  // ─── VSS Shadow Copy list ─────────────────────────────────────────────────
+  ipcMain.handle('scan:vss-list', async function() {
+    try {
+      return await runPythonJson('vss-shadows', [], 10000);
+    } catch(e) {
+      return [];
+    }
+  });
+
+  // ─── Disk Imager ──────────────────────────────────────────────────────────
+  ipcMain.handle('scan:image-disk', async function(event, opts) {
+    if (!opts || !opts.device || !opts.outputImage)
+      return { success: false, message: 'Missing device or outputImage' };
+    return new Promise(function(resolve) {
+      const py     = getPythonExec();
+      const script = path.join(getIpcDir(), 'scan_backend.py');
+      const child  = cp.spawn(py, [
+        script, 'image-disk',
+        '--device', opts.device,
+        '--output-image', opts.outputImage,
+        '--sector-size', String(opts.sectorSize || 512)
+      ], { cwd: getIpcDir(), windowsHide: true });
+      activeScanProcess = child;
+      const sender = event.sender;
+      let out = '';
+      child.stdout.on('data', function(d) { out += d.toString(); });
+      child.stderr.on('data', function(d) { appendLog('STDERR[image-disk] ' + d.toString().trim()); });
+      child.on('close', function() {
+        activeScanProcess = null;
+        const lines = out.trim().split('\n');
+        try { resolve(JSON.parse(lines[lines.length - 1])); }
+        catch(_) { resolve({ success: false, message: 'Imaging process ended' }); }
+      });
+      child.on('error', function(e) { activeScanProcess = null; resolve({ success: false, message: e.message }); });
+    });
+  });
+
 }
 
 module.exports = { setupScanIPC:setupScanIPC, setupDriveWatcher:setupDriveWatcher };

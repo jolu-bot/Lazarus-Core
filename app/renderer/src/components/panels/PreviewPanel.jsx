@@ -1,10 +1,10 @@
-import React, { useEffect, useState, useCallback } from 'react';
+﻿import React, { useEffect, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Download, Wand2, ZoomIn, ZoomOut, RotateCcw,
   Image, Film, FileText, Music, HardDrive, Sparkles,
   AlertCircle, CheckCircle2, ShieldCheck, Wrench,
-  RefreshCcw, AlertTriangle, Activity, SplitSquareHorizontal
+  RefreshCcw, AlertTriangle, Activity, SplitSquareHorizontal, Archive
 } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
 import clsx from 'clsx';
@@ -22,14 +22,26 @@ export default function PreviewPanel(){
   const [compareMode,setCompareMode] = useState(false);
   const [previewSrc,setPreviewSrc]   = useState(null);
   const [imgError,setImgError]       = useState(false);
+  const [livePreview,setLivePreview]  = useState(null);
+  const [liveLoading,setLiveLoading]  = useState(false);
 
   const repairResult = selectedFile ? repairResults[selectedFile.id] : null;
 
   useEffect(()=>{
-    setZoom(1); setImgError(false); setCompareMode(false);
+    setZoom(1); setImgError(false); setCompareMode(false); setLivePreview(null);
     if(!selectedFile?.path){ setPreviewSrc(null); return; }
-    if(selectedFile.type===1||selectedFile.type===2||selectedFile.type===3) setPreviewSrc(`file://${selectedFile.path}`);
-    else setPreviewSrc(null);
+    if(selectedFile.type===1||selectedFile.type===2||selectedFile.type===3){
+      setPreviewSrc(`file://${selectedFile.path}`);
+    } else {
+      setPreviewSrc(null);
+      const p = selectedFile.path;
+      if(p){
+        setLiveLoading(true);
+        lzr?.invoke('scan:preview-file', p, 65536).then(r=>{
+          setLivePreview(r||null);
+        }).catch(()=>{}).finally(()=>setLiveLoading(false));
+      }
+    }
   },[selectedFile]);
 
   const handleRecover = async()=>{
@@ -150,7 +162,7 @@ export default function PreviewPanel(){
           ):selectedFile.type===3?(
             <AudioPreview key={selectedFile.id} src={previewSrc}/>
           ):(
-            <GenericPreview key={selectedFile.id} file={selectedFile}/>
+            <GenericPreview key={selectedFile.id} file={selectedFile} livePreview={livePreview} loading={liveLoading}/>
           )}
         </AnimatePresence>
       </div>
@@ -336,14 +348,61 @@ function AudioPreview({ src }){
   return(<div className="flex flex-col items-center gap-4"><Music size={64} className="text-accent-green opacity-60"/><audio src={src} controls className="w-80"/></div>);
 }
 
-function GenericPreview({ file }){
-  const Icon = file.type===4?FileText:HardDrive;
+function GenericPreview({ file, livePreview, loading }){
+  const Icon = file.type===4?FileText:file.type===5?Archive:HardDrive;
+  if(loading){
+    return(
+      <div className="flex flex-col items-center gap-3 text-text-dim">
+        <Sparkles size={32} className="animate-spin text-primary opacity-60"/>
+        <p className="text-xs">Loading preview...</p>
+      </div>
+    );
+  }
+  if(livePreview?.success && livePreview.head_b64){
+    if(livePreview.kind==='image'){
+      return(
+        <motion.img src={`data:image/jpeg;base64,${livePreview.head_b64}`} alt="preview"
+          initial={{opacity:0}} animate={{opacity:1}}
+          className="max-w-full max-h-full object-contain rounded-lg shadow-panel"/>
+      );
+    }
+    // Hex dump for binary/document/archive
+    const bytes = Uint8Array.from(atob(livePreview.head_b64), c=>c.charCodeAt(0));
+    const lines = [];
+    const ROW = 16;
+    for(let i=0;i<Math.min(bytes.length,512);i+=ROW){
+      const row = bytes.slice(i,i+ROW);
+      const hex = Array.from(row).map(b=>b.toString(16).padStart(2,'0')).join(' ');
+      const asc = Array.from(row).map(b=>(b>=32&&b<127)?String.fromCharCode(b):'.').join('');
+      lines.push(`${i.toString(16).padStart(8,'0')}  ${hex.padEnd(ROW*3-1,' ')}  |${asc}|`);
+    }
+    return(
+      <motion.div initial={{opacity:0}} animate={{opacity:1}}
+        className="flex flex-col w-full h-full overflow-hidden">
+        <div className="flex items-center gap-2 px-4 py-1.5 border-b border-surface-border bg-surface-2 text-xs text-text-dim flex-shrink-0">
+          <HardDrive size={11}/>
+          <span>{livePreview.name}</span>
+          <span>·</span>
+          <span className="font-mono">{fmtSz(livePreview.size)}</span>
+          <span>·</span>
+          <span className="uppercase text-primary font-semibold">{livePreview.kind}</span>
+        </div>
+        <pre className="flex-1 overflow-auto text-[10px] font-mono text-green-400/80 p-4 leading-relaxed whitespace-pre bg-[#050508]">
+          {lines.join('\n')}
+          {livePreview.bytes < livePreview.size && `\n... (showing first ${fmtSz(livePreview.bytes)} of ${fmtSz(livePreview.size)})`}
+        </pre>
+      </motion.div>
+    );
+  }
   return(
     <div className="flex flex-col items-center gap-4 text-text-dim">
       <Icon size={64} className="opacity-30"/>
       <div className="text-center">
         <p className="text-sm font-medium text-text-muted">{file.name}</p>
         <p className="text-xs mt-1">{fmtSz(file.size)} · .{file.extension||'?'}</p>
+        {livePreview && !livePreview.success && (
+          <p className="text-xs text-accent/60 mt-1">Preview unavailable — file not yet recovered</p>
+        )}
       </div>
     </div>
   );
