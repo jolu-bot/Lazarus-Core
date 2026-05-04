@@ -498,6 +498,18 @@ def _read_runlist(data: bytes) -> List[Tuple[int, int]]:
         runs.append((lcn, clen))
     return runs
 
+def _read_run_segments(data: bytes, start_vcn: int) -> List[Tuple[int, int, int]]:
+    # Returns (vcn_start, lcn, cluster_len).
+    segs: List[Tuple[int, int, int]] = []
+    vcn = int(start_vcn)
+    for lcn, clen in _read_runlist(data):
+        if int(clen) <= 0:
+            continue
+        segs.append((vcn, int(lcn), int(clen)))
+        vcn += int(clen)
+    return segs
+
+
 
 def scan_ntfs_mft(max_records_per_volume: int = 40000) -> List[dict]:
     if os.name != 'nt':
@@ -546,6 +558,7 @@ def scan_ntfs_mft(max_records_per_volume: int = 40000) -> List[dict]:
                 size = 0
                 resident_data: bytes = b''
                 data_runs: List[Tuple[int, int]] = []
+                data_segments: List[Tuple[int, int, int]] = []
                 data_real_size = 0
 
                 pcur = attr_off
@@ -582,13 +595,14 @@ def scan_ntfs_mft(max_records_per_volume: int = 40000) -> List[dict]:
                             size = max(size, int(vlen))
                             data_real_size = max(data_real_size, int(vlen))
                         else:
+                            start_vcn = struct.unpack_from('<Q', rec, pcur + 16)[0]
                             run_off = struct.unpack_from('<H', rec, pcur + 32)[0]
                             real_size = struct.unpack_from('<Q', rec, pcur + 48)[0]
                             init_size = struct.unpack_from('<Q', rec, pcur + 56)[0]
                             run_blob = rec[pcur + run_off:pcur + alen]
-                            runs = _read_runlist(run_blob)
-                            if runs:
-                                data_runs = runs
+                            segs = _read_run_segments(run_blob, int(start_vcn))
+                            if segs:
+                                data_segments.extend(segs)
                             data_real_size = max(data_real_size, int(real_size or init_size))
                             size = max(size, int(real_size or init_size))
 
@@ -601,6 +615,10 @@ def scan_ntfs_mft(max_records_per_volume: int = 40000) -> List[dict]:
 
                 if is_dir:
                     continue
+
+                if data_segments:
+                    data_segments.sort(key=lambda x: int(x[0]))
+                    data_runs = [(int(lcn), int(clen)) for (_, lcn, clen) in data_segments]
 
                 ext = name.rsplit('.', 1)[-1].lower() if '.' in name else 'bin'
                 conf = 0.95 if not in_use else 0.72
@@ -623,6 +641,7 @@ def scan_ntfs_mft(max_records_per_volume: int = 40000) -> List[dict]:
                     'mft_record_size': int(rec_size),
                     'mft_offset': int(mft_off),
                     'runlist': data_runs,
+                    'run_segments': data_segments,
                     'resident_b64': base64.b64encode(resident_data).decode('ascii') if resident_data and len(resident_data) <= 1024 * 1024 else '',
                     'file_size': int(data_real_size or size),
                 }
@@ -652,6 +671,7 @@ def scan_ntfs_mft(max_records_per_volume: int = 40000) -> List[dict]:
                     'mft_record_size': fm['mft_record_size'],
                     'mft_offset': fm['mft_offset'],
                     'runlist': fm['runlist'],
+                    'run_segments': fm.get('run_segments', []),
                     'resident_b64': fm['resident_b64'],
                     'file_size': fm['file_size'],
                 }
@@ -975,9 +995,31 @@ def _recover_ntfs_mft_file(file_obj: dict, dest: Path) -> bool:
         except Exception as e:
             log_err(f'NTFS resident recover error: {e}')
 
-    runs = file_obj.get('runlist') or []
-    if not isinstance(runs, list) or not runs:
+    segs = file_obj.get('run_segments') or []
+    runs_legacy = file_obj.get('runlist') or []
+
+    segments: List[Tuple[int, int, int]] = []
+    if isinstance(segs, list) and segs and isinstance(segs[0], (list, tuple)) and len(segs[0]) == 3:
+        for x in segs:
+            try:
+                segments.append((int(x[0]), int(x[1]), int(x[2])))
+            except Exception:
+                continue
+    elif isinstance(runs_legacy, list) and runs_legacy:
+        vcn = 0
+        for r in runs_legacy:
+            if not isinstance(r, (list, tuple)) or len(r) != 2:
+                continue
+            lcn = int(r[0]); clen = int(r[1])
+            if clen <= 0:
+                continue
+            segments.append((vcn, lcn, clen))
+            vcn += clen
+
+    if not segments:
         return False
+
+    segments.sort(key=lambda t: t[0])
 
     cluster_size = int(file_obj.get('cluster_size') or 4096)
     file_size = int(file_obj.get('file_size') or 0)
@@ -992,13 +1034,33 @@ def _recover_ntfs_mft_file(file_obj: dict, dest: Path) -> bool:
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         with open(dest, 'wb') as wf:
-            for run in runs:
-                if not isinstance(run, (list, tuple)) or len(run) != 2:
-                    continue
-                lcn = int(run[0])
-                clen = int(run[1])
+            expected_vcn = 0
+
+            def _write_zeros(count: int):
+                nonlocal written
+                chunk = b'\x00' * 1048576
+                left = int(count)
+                while left > 0:
+                    n = min(left, len(chunk))
+                    wf.write(chunk[:n])
+                    written += n
+                    left -= n
+
+            for (vcn, lcn, clen) in segments:
                 if clen <= 0:
                     continue
+
+                # Fill hole between extents (sparse / missing VCN range).
+                if vcn > expected_vcn:
+                    gap_bytes = (vcn - expected_vcn) * cluster_size
+                    if remaining is not None:
+                        gap_bytes = min(gap_bytes, remaining)
+                    if gap_bytes > 0:
+                        _write_zeros(gap_bytes)
+                        if remaining is not None:
+                            remaining -= gap_bytes
+                            if remaining <= 0:
+                                break
 
                 run_bytes = clen * cluster_size
                 if remaining is not None:
@@ -1007,24 +1069,30 @@ def _recover_ntfs_mft_file(file_obj: dict, dest: Path) -> bool:
                     break
 
                 if lcn <= 0:
-                    wf.write(b'\x00' * run_bytes)
-                    written += run_bytes
+                    _write_zeros(run_bytes)
                 else:
                     fh.seek(lcn * cluster_size)
                     left = run_bytes
                     while left > 0:
                         chunk = fh.read(min(1024 * 1024, left))
                         if not chunk:
+                            _write_zeros(left)
                             break
                         wf.write(chunk)
                         csz = len(chunk)
                         written += csz
                         left -= csz
 
+                expected_vcn = max(expected_vcn, vcn + clen)
+
                 if remaining is not None:
                     remaining -= run_bytes
                     if remaining <= 0:
                         break
+
+            if remaining is not None and remaining > 0:
+                _write_zeros(remaining)
+
         return written > 0 and dest.exists()
     except Exception as e:
         log_err(f'NTFS non-resident recover error: {e}')
