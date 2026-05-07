@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Lazarus Core - scan backend (real engines only)."""
 from __future__ import annotations
 
@@ -1625,6 +1625,186 @@ def cmd_preview(file_path: str, max_bytes: int):
     }))
 
 
+# ─── Forensic Report ─────────────────────────────────────────────────────────
+
+_REPORT_HTML_STYLE = """
+<style>
+body{font-family:monospace;background:#0d1117;color:#c9d1d9;margin:0;padding:24px}
+h1{color:#58a6ff;border-bottom:1px solid #30363d;padding-bottom:8px}
+h2{color:#8b949e;font-size:13px;margin-top:20px}
+table{border-collapse:collapse;width:100%;font-size:12px;margin-top:8px}
+th{background:#161b22;color:#8b949e;text-align:left;padding:6px 10px;border:1px solid #30363d}
+td{padding:5px 10px;border:1px solid #30363d;vertical-align:top;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+tr:hover td{background:#161b22}
+.good{color:#3fb950}.warn{color:#d29922}.bad{color:#f85149}.info{color:#58a6ff}
+.score-bar{display:inline-block;height:6px;border-radius:3px;vertical-align:middle;margin-right:4px}
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin:16px 0}
+.card{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px}
+.card-val{font-size:22px;font-weight:bold;color:#58a6ff}
+.card-lbl{font-size:11px;color:#8b949e;margin-top:4px}
+</style>
+"""
+
+
+def _html_score_bar(score: int) -> str:
+    color = '#3fb950' if score >= 85 else '#d29922' if score >= 70 else '#f97316' if score >= 50 else '#f85149'
+    return f'<span class="score-bar" style="width:{score}px;background:{color}"></span><span style="color:{color}">{score}%</span>'
+
+
+def cmd_report(report_obj: dict, out_dir: str):
+    import datetime
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    files: List[dict] = report_obj.get('files') or []
+    device: str = report_obj.get('device') or 'unknown'
+    scan_started: str = report_obj.get('scanStarted') or ''
+    scan_ended: str = report_obj.get('scanEndedAt') or report_obj.get('scanEnded') or ''
+
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+    ts_label = now_iso[:19].replace('T', ' ')
+
+    # ── compute summary ──────────────────────────────────────────────────────
+    total_bytes = sum(int(f.get('size') or 0) for f in files)
+    by_type: Dict[str, int] = {}
+    by_source: Dict[str, int] = {}
+    health_scores: List[int] = []
+    for f in files:
+        ext = (f.get('extension') or 'unknown').lower()
+        by_type[ext] = by_type.get(ext, 0) + 1
+        src = f.get('source') or 'unknown'
+        by_source[src] = by_source.get(src, 0) + 1
+        h = f.get('health') or {}
+        sc = h.get('score') if isinstance(h, dict) else None
+        if sc is None:
+            sc = round((f.get('confidence') or 0) * 100)
+        health_scores.append(int(sc))
+
+    avg_health = round(sum(health_scores) / len(health_scores)) if health_scores else 0
+    excellent = sum(1 for s in health_scores if s >= 85)
+    recoverable = sum(1 for s in health_scores if s >= 50)
+
+    summary = {
+        'total_files': len(files),
+        'total_bytes_recovered': total_bytes,
+        'average_health_score': avg_health,
+        'excellent_files': excellent,
+        'recoverable_files': recoverable,
+        'by_extension': by_type,
+        'by_source': by_source,
+    }
+
+    # ── build structured file list ───────────────────────────────────────────
+    report_files = []
+    for f in files:
+        h = f.get('health') or {}
+        sc = h.get('score') if isinstance(h, dict) else round((f.get('confidence') or 0) * 100)
+        hashes = f.get('hashes') or {}
+        report_files.append({
+            'id': f.get('id'),
+            'name': f.get('name') or '',
+            'extension': (f.get('extension') or '').lower(),
+            'size_bytes': int(f.get('size') or 0),
+            'health_score': int(sc or 0),
+            'health_label': h.get('label') if isinstance(h, dict) else '',
+            'status': f.get('status'),
+            'source': f.get('source') or 'unknown',
+            'recovered_path': f.get('outputPath') or f.get('path') or '',
+            'md5': hashes.get('md5') or '',
+            'sha256': hashes.get('sha256') or '',
+        })
+
+    report_json = {
+        'tool': 'Lazarus Core v1.0',
+        'generated_at': now_iso,
+        'scan_started': scan_started,
+        'scan_ended': scan_ended,
+        'device': device,
+        'summary': summary,
+        'files': report_files,
+    }
+
+    # ── write JSON ───────────────────────────────────────────────────────────
+    json_name = f'lazarus_report_{ts_label.replace(" ","_").replace(":","")}.json'
+    json_path = out_path / json_name
+    json_path.write_text(json.dumps(report_json, indent=2, ensure_ascii=False), encoding='utf-8')
+
+    # ── write HTML ───────────────────────────────────────────────────────────
+    top10_ext = sorted(by_type.items(), key=lambda x: -x[1])[:10]
+    top10_src = sorted(by_source.items(), key=lambda x: -x[1])
+
+    def fmtsz(n: int) -> str:
+        if n < 1024: return f'{n} B'
+        if n < 1048576: return f'{n/1024:.1f} KB'
+        if n < 1073741824: return f'{n/1048576:.1f} MB'
+        return f'{n/1073741824:.2f} GB'
+
+    rows_html = ''
+    for rf in report_files:
+        sc = rf['health_score']
+        color = 'good' if sc >= 85 else 'warn' if sc >= 70 else 'bad'
+        md5_short = rf['md5'][:16] + '...' if len(rf['md5']) > 16 else rf['md5']
+        rows_html += (
+            f'<tr>'
+            f'<td>{rf["id"]}</td>'
+            f'<td title="{rf["name"]}">{rf["name"][:50]}</td>'
+            f'<td class="info">.{rf["extension"]}</td>'
+            f'<td>{fmtsz(rf["size_bytes"])}</td>'
+            f'<td class="{color}">{_html_score_bar(sc)}</td>'
+            f'<td class="info">{rf["source"]}</td>'
+            f'<td title="{rf["recovered_path"]}">{rf["recovered_path"][-50:]}</td>'
+            f'<td title="{rf["md5"]}">{md5_short}</td>'
+            f'</tr>\n'
+        )
+
+    ext_rows = ''.join(f'<tr><td>.{e}</td><td>{c}</td></tr>' for e, c in top10_ext)
+    src_rows = ''.join(f'<tr><td>{s}</td><td>{c}</td></tr>' for s, c in top10_src)
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Lazarus Core - Forensic Report</title>{_REPORT_HTML_STYLE}</head>
+<body>
+<h1>&#128273; Lazarus Core — Forensic Recovery Report</h1>
+<p class="info">Generated: {ts_label} UTC &nbsp;|&nbsp; Device: <code>{device}</code></p>
+
+<div class="summary-grid">
+  <div class="card"><div class="card-val">{len(files)}</div><div class="card-lbl">Files Found</div></div>
+  <div class="card"><div class="card-val">{fmtsz(total_bytes)}</div><div class="card-lbl">Total Recovered</div></div>
+  <div class="card"><div class="card-val {'good' if avg_health>=70 else 'warn'}">{avg_health}%</div><div class="card-lbl">Avg Health Score</div></div>
+  <div class="card"><div class="card-val good">{excellent}</div><div class="card-lbl">Excellent (&ge;85%)</div></div>
+  <div class="card"><div class="card-val">{recoverable}</div><div class="card-lbl">Recoverable (&ge;50%)</div></div>
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px">
+<div>
+<h2>Top Extensions</h2>
+<table><tr><th>Extension</th><th>Count</th></tr>{ext_rows}</table>
+</div>
+<div>
+<h2>By Source Engine</h2>
+<table><tr><th>Engine</th><th>Count</th></tr>{src_rows}</table>
+</div>
+</div>
+
+<h2>All Recovered Files ({len(files)})</h2>
+<table>
+<tr><th>#</th><th>Name</th><th>Ext</th><th>Size</th><th>Health</th><th>Source</th><th>Path</th><th>MD5</th></tr>
+{rows_html}
+</table>
+</body></html>"""
+
+    html_name = json_name.replace('.json', '.html')
+    html_path = out_path / html_name
+    html_path.write_text(html, encoding='utf-8')
+
+    print(json.dumps({
+        'success': True,
+        'jsonPath': str(json_path),
+        'htmlPath': str(html_path),
+        'totalFiles': len(files),
+        'totalBytes': total_bytes,
+    }))
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest='cmd', required=True)
@@ -1650,6 +1830,10 @@ def main():
     p_prev.add_argument('--file', required=True)
     p_prev.add_argument('--max-bytes', type=int, default=65536)
 
+    p_rep2 = sub.add_parser('report')
+    p_rep2.add_argument('--report-json', required=True)
+    p_rep2.add_argument('--output-dir', default=str(Path.home() / 'LazarusReports'))
+
     args = parser.parse_args()
 
     if args.cmd == 'enumerate':
@@ -1665,7 +1849,13 @@ def main():
         cmd_repair(json.loads(args.args_json))
     elif args.cmd == 'preview':
         cmd_preview(args.file, args.max_bytes)
+    elif args.cmd == 'report':
+        cmd_report(json.loads(args.report_json), args.output_dir)
+    elif args.cmd == 'report':
+        cmd_report(json.loads(args.report_json), args.output_dir)
 
 
 if __name__ == '__main__':
     main()
+
+

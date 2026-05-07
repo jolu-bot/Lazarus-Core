@@ -445,7 +445,6 @@ function setupScanIPC(ipcMain) {
     }
     return { success:recoveryOk, outputPath:destPath, health:file.health || {}, repaired:recoveryOk };
   });
-}
 
   // ─── VSS Shadow Copy list ─────────────────────────────────────────────────
   ipcMain.handle('scan:vss-list', async function() {
@@ -484,6 +483,39 @@ function setupScanIPC(ipcMain) {
     });
   });
 
+  // --- Forensic Report Generator ---
+  ipcMain.handle('scan:generate-report', async function(_, opts) {
+    if (!opts || !opts.files || !opts.outputDir)
+      return { success: false, message: 'Missing files or outputDir' };
+    const py     = getPythonExec();
+    const script = path.join(getIpcDir(), 'scan_backend.py');
+    const reportJson = JSON.stringify({
+      files:       opts.files,
+      device:      opts.device      || 'unknown',
+      scanStarted: opts.scanStarted || '',
+      scanEnded:   opts.scanEnded   || '',
+    });
+    return new Promise(function(resolve) {
+      const child = cp.spawn(py, [
+        script, 'report',
+        '--report-json', reportJson,
+        '--output-dir',  opts.outputDir,
+      ], { cwd: getIpcDir(), windowsHide: true });
+      let out = '', err2 = '';
+      child.stdout.on('data', function(d) { out += d.toString(); });
+      child.stderr.on('data', function(d) { err2 += d.toString(); appendLog('STDERR[report] ' + d.toString().trim()); });
+      child.on('close', function(code) {
+        if (code !== 0 && !out.trim()) { resolve({ success: false, message: err2 || 'Report failed' }); return; }
+        const lines = out.trim().split('\\n');
+        try { resolve(JSON.parse(lines[lines.length - 1])); }
+        catch(_) { resolve({ success: false, message: 'Invalid output' }); }
+      });
+      child.on('error', function(e) { resolve({ success: false, message: e.message }); });
+    });
+  });
+
+
 }
 
 module.exports = { setupScanIPC:setupScanIPC, setupDriveWatcher:setupDriveWatcher };
+

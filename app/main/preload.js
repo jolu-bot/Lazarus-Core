@@ -6,7 +6,7 @@ const VALID_INVOKE = new Set([
   'dialog:openFolder','dialog:saveFile','shell:openPath',
   'app:getVersion','app:getPlatform',
   'scan:start','scan:stop','scan:recover','scan:enumerate-drives',
-  'scan:analyze-health','scan:repair-file','scan:preview-file','scan:vss-list','scan:image-disk',
+  'scan:analyze-health','scan:repair-file','scan:preview-file','scan:vss-list','scan:image-disk','scan:generate-report',
   'license:validate','license:get','license:activate',
   'app:getSettings','app:setSettings','app:export-files',
   'history:get','history:clear',
@@ -34,3 +34,4 @@ contextBridge.exposeInMainWorld('lazarus', {
     return () => ipcRenderer.removeListener(ch, sub);
   },
 });
+
