@@ -65,18 +65,6 @@ export default function FileList(){
     if(r&&r.success){addToast("Report saved: "+r.totalFiles+" files","success");window.lazarus?.invoke("shell:openPath",dir);}
     else{addToast("Report failed: "+((r&&r.message)||"error"),"error");}
   };
-  const [reportLoading,setReportLoading]=useState(false);
-  const handleReport=async()=>{
-    if(!filteredFiles.length){addToast("No files to report","error");return;}
-    const dir=await window.lazarus?.invoke("dialog:openFolder");
-    if(!dir)return;
-    setReportLoading(true);
-    addToast("Generating forensic report...","info");
-    const r=await window.lazarus?.invoke("scan:generate-report",{files:filteredFiles,outputDir:dir});
-    setReportLoading(false);
-    if(r&&r.success){addToast("Report saved: "+r.totalFiles+" files","success");window.lazarus?.invoke("shell:openPath",dir);}
-    else{addToast("Report failed: "+((r&&r.message)||"error"),"error");}
-  };
 
   return(
     <div className="flex flex-col w-[480px] border-r border-surface-border flex-shrink-0 bg-bg">
@@ -128,8 +116,6 @@ export default function FileList(){
             <button onClick={()=>handleExport('csv')} className="flex items-center gap-1 text-text-dim hover:text-primary transition-colors"><FileDown size={12}/>CSV</button>
             <span className="opacity-30">|</span>
             <button onClick={()=>handleExport('json')} className="flex items-center gap-1 text-text-dim hover:text-primary transition-colors"><FileDown size={12}/>JSON</button>
-            <span className="opacity-30">|</span>
-            <button onClick={handleReport} disabled={reportLoading} className="flex items-center gap-1 text-text-dim hover:text-green-400 transition-colors disabled:opacity-40" title="Forensic Report"><ShieldCheck size={12}/>{reportLoading?'..':'Report'}</button>
             <span className="opacity-30">|</span>
             <button onClick={handleReport} disabled={reportLoading} className="flex items-center gap-1 text-text-dim hover:text-green-400 transition-colors disabled:opacity-40" title="Forensic Report"><ShieldCheck size={12}/>{reportLoading?'..':'Report'}</button>
           </div>
