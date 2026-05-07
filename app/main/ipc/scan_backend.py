@@ -1132,6 +1132,792 @@ def scan_ext_volume(device_path: str, out_path: Path, start_id: int = 0, max_gro
     emit('done', {'filesFound': file_id - start_id, 'engine': 'ext'})
     return file_id
 
+# ==================== APFS B-tree scanner ====================
+# APFS on-disk constants
+_APFS_NX_MAGIC       = b'BSXN'   # nx_superblock_t o_cksum starts, magic at +32 = NXSB -> b'NXSB' little-endian = 0x4253584e
+_APFS_NX_MAGIC2      = b'NXSB'
+_APFS_OMAP_MAGIC     = b'PAMB'   # BMAP little-endian = omap_phys_t magic
+_APFS_BTREE_MAGIC    = b'BTOR'   # ROTB  btree_node_phys_t magic
+_APFS_FS_MAGIC       = b'BSPA'   # APSB  apfs_superblock_t magic
+_APFS_INODE_TYPE     = 3         # OBJ_TYPE_INODE
+_APFS_DREC_TYPE      = 9         # OBJ_TYPE_DREC
+_APFS_EXTENT_TYPE    = 8         # OBJ_TYPE_FILE_EXTENT
+
+
+def _apfs_fletcher64(data: bytes) -> int:
+    """Simple block-level checksum verification (not strict)."""
+    s1 = s2 = 0
+    for i in range(0, len(data) - 8, 4):
+        val = struct.unpack_from('<I', data, i)[0]
+        s1 = (s1 + val) & 0xFFFFFFFFFFFFFFFF
+        s2 = (s2 + s1)  & 0xFFFFFFFFFFFFFFFF
+    return s2
+
+
+def _apfs_read_block(fh, paddr: int, block_size: int = 4096) -> bytes:
+    try:
+        fh.seek(paddr * block_size)
+        return fh.read(block_size)
+    except Exception:
+        return b''
+
+
+def _apfs_parse_nx_super(data: bytes) -> Optional[dict]:
+    """Parse nx_superblock_t — block 0 of the container."""
+    if len(data) < 1024:
+        return None
+    magic = data[32:36]
+    if magic != _APFS_NX_MAGIC2:
+        return None
+    block_size = struct.unpack_from('<I', data, 36)[0]
+    block_count = struct.unpack_from('<Q', data, 40)[0]
+    omap_oid = struct.unpack_from('<Q', data, 160)[0]    # nx_omap_oid
+    # fs_oid array starts at offset 184, up to 100 volumes
+    fs_oids = []
+    for i in range(100):
+        off = 184 + i * 8
+        if off + 8 > len(data):
+            break
+        oid = struct.unpack_from('<Q', data, off)[0]
+        if oid == 0:
+            break
+        fs_oids.append(oid)
+    return {'block_size': block_size, 'block_count': block_count,
+            'omap_oid': omap_oid, 'fs_oids': fs_oids}
+
+
+def _apfs_omap_lookup(fh, omap_root_paddr: int, oid: int, block_size: int) -> int:
+    """Walk the container omap B-tree to resolve oid -> paddr.
+    Returns physical block address or 0 on failure."""
+    MAX_DEPTH = 6
+    paddr = omap_root_paddr
+
+    for _ in range(MAX_DEPTH):
+        data = _apfs_read_block(fh, paddr, block_size)
+        if len(data) < 56:
+            return 0
+        # btree_node_phys_t: flags at offset 40 (u16)
+        flags = struct.unpack_from('<H', data, 40)[0]
+        nkeys = struct.unpack_from('<H', data, 42)[0]
+        # leaf = bit 0 set in flags, root = bit 1
+        is_leaf = bool(flags & 0x4)  # BTNODE_LEAF = 0x0004
+
+        # Key/value area starts at offset 56 for non-root, 88 for root btree
+        # table-of-contents (toc) starts immediately after the header (56 bytes)
+        # Each toc entry: key_off(u16) key_len(u16) val_off(u16) val_len(u16)
+        header_size = 56
+        toc_off = header_size
+
+        best_paddr = 0
+        best_oid = 0
+
+        for i in range(min(nkeys, 512)):
+            entry_off = toc_off + i * 8
+            if entry_off + 8 > len(data):
+                break
+            k_off, k_len, v_off, v_len = struct.unpack_from('<HHHH', data, entry_off)
+            # keys start right after toc; toc area = nkeys*8 bytes
+            key_base = toc_off + nkeys * 8
+            key_abs = key_base + k_off
+            if key_abs + 8 > len(data):
+                continue
+            entry_oid = struct.unpack_from('<Q', data, key_abs)[0]
+            if entry_oid > oid:
+                break
+            if entry_oid <= oid:
+                best_oid = entry_oid
+                if is_leaf:
+                    val_base = len(data)  # values grow from end
+                    val_abs = val_base - v_off
+                    if val_abs + 8 <= len(data):
+                        best_paddr = struct.unpack_from('<Q', data, val_abs)[0]
+                else:
+                    val_base = len(data)
+                    val_abs = val_base - v_off
+                    if val_abs + 8 <= len(data):
+                        best_paddr = struct.unpack_from('<Q', data, val_abs)[0]
+
+        if best_paddr == 0:
+            return 0
+        if is_leaf:
+            return best_paddr if best_oid == oid else 0
+        paddr = best_paddr
+
+    return 0
+
+
+def _apfs_parse_fs_super(data: bytes) -> Optional[dict]:
+    """Parse apfs_superblock_t (APSB block)."""
+    if len(data) < 512:
+        return None
+    magic = data[32:36]
+    if magic != _APFS_FS_MAGIC:
+        return None
+    omap_oid   = struct.unpack_from('<Q', data, 160)[0]   # apfs_omap_oid
+    root_tree_oid = struct.unpack_from('<Q', data, 168)[0] # apfs_root_tree_oid
+    inode_count = struct.unpack_from('<Q', data, 288)[0]
+    return {'omap_oid': omap_oid, 'root_tree_oid': root_tree_oid, 'inode_count': inode_count}
+
+
+def _apfs_iter_fs_tree(fh, root_paddr: int, block_size: int,
+                        omap_paddr: int) -> List[dict]:
+    """Walk the filesystem B-tree, yielding inode + extent records."""
+    results = []
+    stack = [root_paddr]
+    visited: set = set()
+    MAX_NODES = 50000
+
+    while stack and len(visited) < MAX_NODES:
+        paddr = stack.pop()
+        if paddr in visited or paddr == 0:
+            continue
+        visited.add(paddr)
+
+        data = _apfs_read_block(fh, paddr, block_size)
+        if len(data) < 56:
+            continue
+
+        flags = struct.unpack_from('<H', data, 40)[0]
+        nkeys = struct.unpack_from('<H', data, 42)[0]
+        is_leaf = bool(flags & 0x4)
+        is_root = bool(flags & 0x2)
+
+        toc_off = 56
+        key_base = toc_off + nkeys * 8
+
+        for i in range(min(nkeys, 1024)):
+            entry_off = toc_off + i * 8
+            if entry_off + 8 > len(data):
+                break
+            k_off, k_len, v_off, v_len = struct.unpack_from('<HHHH', data, entry_off)
+            key_abs = key_base + k_off
+            if key_abs + k_len > len(data) or k_len < 8:
+                continue
+
+            # Key layout: obj_id_and_type (u64) = oid(60 bits) | type(4 bits high)
+            oid_type_raw = struct.unpack_from('<Q', data, key_abs)[0]
+            obj_id  = oid_type_raw & 0x0FFFFFFFFFFFFFFF
+            obj_type = (oid_type_raw >> 60) & 0xF
+
+            val_abs = len(data) - v_off
+            if val_abs + v_len > len(data) or val_abs < 0:
+                continue
+
+            if is_leaf:
+                if obj_type == _APFS_INODE_TYPE and v_len >= 88:
+                    # inode_val_t: parent_id(8) private_id(8) create_time(8) mod_time(8)
+                    # change_time(8) access_time(8) internal_flags(8)
+                    # nchildren_or_nlink(4) default_prot_class(4) write_gen_counter(4)
+                    # bsd_flags(4) uid(4) gid(4) mode(2) pad1(2) uncompressed_size(8)
+                    # then xfields
+                    try:
+                        inode_size = struct.unpack_from('<Q', data, val_abs + 56)[0]  # uncompressed_size offset ~56 in val
+                        # Actually: parent_id(8)+private_id(8)+ctime(8)+mtime(8)+chgtime(8)+acctime(8)+flags(8)+nlink(4)+defprot(4)+wgen(4)+bsdflags(4)+uid(4)+gid(4)+mode(2)+pad1(2)+uncomp_size(8) = 96 bytes before xfields
+                        if v_len >= 96:
+                            inode_size = struct.unpack_from('<Q', data, val_abs + 88)[0]
+                        mode = struct.unpack_from('<H', data, val_abs + 80)[0] if v_len >= 82 else 0
+                        if (mode & 0xF000) == 0x8000 and inode_size >= MIN_FILE:
+                            results.append({'obj_id': obj_id, 'size': inode_size,
+                                           'type': 'inode', 'extents': []})
+                    except Exception:
+                        pass
+
+                elif obj_type == _APFS_EXTENT_TYPE and v_len >= 16:
+                    # file_extent_val_t: len_and_flags(8) phys_block_num(8) crypto_id(8)
+                    try:
+                        len_flags = struct.unpack_from('<Q', data, val_abs)[0]
+                        phys_blk  = struct.unpack_from('<Q', data, val_abs + 8)[0]
+                        ext_len   = len_flags & 0x00FFFFFFFFFFFFFF
+                        logical_off = 0
+                        # key for extent: oid(60) | type(4) then file_offset(8)
+                        if k_len >= 16:
+                            logical_off = struct.unpack_from('<Q', data, key_abs + 8)[0]
+                        results.append({'obj_id': obj_id, 'type': 'extent',
+                                       'phys_blk': phys_blk, 'ext_len': ext_len,
+                                       'logical_off': logical_off})
+                    except Exception:
+                        pass
+
+                elif obj_type == _APFS_DREC_TYPE and v_len >= 18:
+                    # drec_val_t: file_id(8) date_added(8) flags(2) xfields...
+                    try:
+                        child_id = struct.unpack_from('<Q', data, val_abs)[0]
+                        # name from key after the 8-byte oid+type and 4-byte hash
+                        name_off = key_abs + 12
+                        name_end = key_abs + k_len
+                        raw_name = data[name_off:name_end]
+                        name = raw_name.split(b'\x00')[0].decode('utf-8', errors='replace')
+                        results.append({'obj_id': child_id, 'type': 'drec', 'name': name})
+                    except Exception:
+                        pass
+            else:
+                # Internal node: value is child paddr
+                if val_abs + 8 <= len(data):
+                    try:
+                        child_oid = struct.unpack_from('<Q', data, val_abs)[0]
+                        # resolve via omap if needed
+                        child_paddr = _apfs_omap_lookup(fh, omap_paddr, child_oid, block_size) if omap_paddr else child_oid
+                        if child_paddr > 0:
+                            stack.append(child_paddr)
+                    except Exception:
+                        pass
+
+    return results
+
+
+def scan_apfs_volume(device_path: str, out_path: Path,
+                     start_id: int = 0) -> int:
+    """APFS B-tree scanner: reads container -> omap -> FS tree -> inodes+extents."""
+    fh, err = open_raw_device(device_path)
+    if not fh:
+        log_err(f'APFS scan open failed: {err}')
+        return start_id
+
+    file_id = start_id
+    try:
+        # Try block 0 first, then common offsets (GPT partition etc.)
+        for base_block in [0, 1, 2]:
+            block0 = _apfs_read_block(fh, base_block, 4096)
+            if len(block0) >= 36 and block0[32:36] == _APFS_NX_MAGIC2:
+                break
+        else:
+            return start_id
+
+        nx = _apfs_parse_nx_super(block0)
+        if not nx:
+            return start_id
+
+        bsz = nx['block_size']
+        log_err(f'APFS container found: block_size={bsz} fs_count={len(nx["fs_oids"])}')
+        emit('progress', {'percent': 2, 'finished': False, 'filesFound': file_id - start_id,
+                          'currentPath': 'APFS container detected', 'engine': 'apfs'})
+
+        # Resolve container omap
+        omap_block = _apfs_read_block(fh, nx['omap_oid'], bsz)
+        # omap_phys_t: magic(4) at +32, tree_oid at +48 (root of the omap btree as physical addr)
+        omap_tree_paddr = 0
+        if len(omap_block) >= 56 and omap_block[32:36] in (b'PAMB', b'BMAP'):
+            omap_tree_paddr = struct.unpack_from('<Q', omap_block, 48)[0]
+
+        # Walk each APFS volume
+        for vol_idx, fs_oid in enumerate(nx['fs_oids'][:8]):
+            fs_paddr = _apfs_omap_lookup(fh, omap_tree_paddr or nx['omap_oid'], fs_oid, bsz) if omap_tree_paddr else fs_oid
+            if fs_paddr == 0:
+                fs_paddr = fs_oid  # fallback: treat as physical
+
+            fs_block = _apfs_read_block(fh, fs_paddr, bsz)
+            fs_super = _apfs_parse_fs_super(fs_block)
+            if not fs_super:
+                continue
+
+            log_err(f'APFS volume {vol_idx}: root_tree_oid={fs_super["root_tree_oid"]}')
+
+            # Resolve volume omap
+            vol_omap_block = _apfs_read_block(fh, fs_super['omap_oid'], bsz)
+            vol_omap_paddr = 0
+            if len(vol_omap_block) >= 56:
+                vol_omap_paddr = struct.unpack_from('<Q', vol_omap_block, 48)[0]
+
+            # Resolve root tree physical address
+            root_paddr = _apfs_omap_lookup(fh, vol_omap_paddr or fs_super['omap_oid'],
+                                            fs_super['root_tree_oid'], bsz) if vol_omap_paddr else fs_super['root_tree_oid']
+            if root_paddr == 0:
+                root_paddr = fs_super['root_tree_oid']
+
+            records = _apfs_iter_fs_tree(fh, root_paddr, bsz, vol_omap_paddr)
+
+            # Build name map from drec records
+            names: Dict[int, str] = {}
+            for r in records:
+                if r['type'] == 'drec' and r.get('name'):
+                    names[r['obj_id']] = r['name']
+
+            # Build extent map: obj_id -> list of (logical_off, phys_blk, ext_len)
+            extents_map: Dict[int, List[Tuple[int, int, int]]] = {}
+            for r in records:
+                if r['type'] == 'extent':
+                    oid = r['obj_id']
+                    if oid not in extents_map:
+                        extents_map[oid] = []
+                    extents_map[oid].append((r['logical_off'], r['phys_blk'], r['ext_len']))
+
+            # Process inodes
+            out_path.mkdir(parents=True, exist_ok=True)
+            for r in records:
+                if r['type'] != 'inode':
+                    continue
+                oid = r['obj_id']
+                size = r['size']
+                name = names.get(oid, f'apfs_{file_id:06d}_ino{oid}')
+                # sanitize name
+                name = name.replace('/', '_').replace('..', '_')
+                if not name:
+                    name = f'apfs_{file_id:06d}'
+
+                exts = sorted(extents_map.get(oid, []), key=lambda x: x[0])
+                if not exts:
+                    continue
+
+                # Guess extension from first block
+                first_block = _apfs_read_block(fh, exts[0][1], bsz) if exts[0][1] > 0 else b''
+                guessed_ext = _guess_ext_from_head(first_block[:64])
+                dot = name.rfind('.')
+                if dot > 0:
+                    guessed_ext = name[dot+1:].lower()
+
+                dest = out_path / f'apfs_{file_id:06d}_{name}'
+                remaining = size
+                written = 0
+                try:
+                    with open(dest, 'wb') as wf:
+                        for log_off, phys_blk, ext_len in exts:
+                            if remaining <= 0:
+                                break
+                            run_bytes = min(remaining, ext_len)
+                            fh.seek(phys_blk * bsz)
+                            left = run_bytes
+                            while left > 0:
+                                chunk = fh.read(min(524288, left))
+                                if not chunk:
+                                    break
+                                wf.write(chunk)
+                                written += len(chunk)
+                                left -= len(chunk)
+                            remaining -= run_bytes
+                    if written < MIN_FILE:
+                        try:
+                            dest.unlink()
+                        except Exception:
+                            pass
+                        continue
+                except Exception as e:
+                    log_err(f'APFS write error {dest}: {e}')
+                    continue
+
+                conf = 0.80 if written >= size * 0.9 else 0.55
+                rec = {
+                    'id': file_id, 'name': name,
+                    'extension': guessed_ext, 'size': size,
+                    'type': type_for_ext(guessed_ext),
+                    'status': 1, 'confidence': conf,
+                    'path': str(dest), 'outputPath': str(dest),
+                    'source': 'apfs_btree',
+                }
+                rec['health'] = compute_health(rec, file_id)
+                emit('file-found', rec)
+                file_id += 1
+
+                if file_id % 100 == 0:
+                    pct = min(95, 10 + int((file_id - start_id) / max(1, fs_super['inode_count']) * 80))
+                    emit('progress', {'percent': pct, 'finished': False, 'filesFound': file_id - start_id,
+                                      'currentPath': str(dest.name), 'engine': 'apfs'})
+
+        emit('progress', {'percent': 98, 'finished': False, 'filesFound': file_id - start_id,
+                          'currentPath': 'APFS scan complete', 'engine': 'apfs'})
+    except Exception as e:
+        log_err(f'APFS scan error: {e}')
+    finally:
+        try:
+            fh.close()
+        except Exception:
+            pass
+
+    return file_id
+
+
+# ==================== APFS B-tree scanner ====================
+# APFS on-disk constants
+_APFS_NX_MAGIC       = b'BSXN'   # nx_superblock_t o_cksum starts, magic at +32 = NXSB -> b'NXSB' little-endian = 0x4253584e
+_APFS_NX_MAGIC2      = b'NXSB'
+_APFS_OMAP_MAGIC     = b'PAMB'   # BMAP little-endian = omap_phys_t magic
+_APFS_BTREE_MAGIC    = b'BTOR'   # ROTB  btree_node_phys_t magic
+_APFS_FS_MAGIC       = b'BSPA'   # APSB  apfs_superblock_t magic
+_APFS_INODE_TYPE     = 3         # OBJ_TYPE_INODE
+_APFS_DREC_TYPE      = 9         # OBJ_TYPE_DREC
+_APFS_EXTENT_TYPE    = 8         # OBJ_TYPE_FILE_EXTENT
+
+
+def _apfs_fletcher64(data: bytes) -> int:
+    """Simple block-level checksum verification (not strict)."""
+    s1 = s2 = 0
+    for i in range(0, len(data) - 8, 4):
+        val = struct.unpack_from('<I', data, i)[0]
+        s1 = (s1 + val) & 0xFFFFFFFFFFFFFFFF
+        s2 = (s2 + s1)  & 0xFFFFFFFFFFFFFFFF
+    return s2
+
+
+def _apfs_read_block(fh, paddr: int, block_size: int = 4096) -> bytes:
+    try:
+        fh.seek(paddr * block_size)
+        return fh.read(block_size)
+    except Exception:
+        return b''
+
+
+def _apfs_parse_nx_super(data: bytes) -> Optional[dict]:
+    """Parse nx_superblock_t — block 0 of the container."""
+    if len(data) < 1024:
+        return None
+    magic = data[32:36]
+    if magic != _APFS_NX_MAGIC2:
+        return None
+    block_size = struct.unpack_from('<I', data, 36)[0]
+    block_count = struct.unpack_from('<Q', data, 40)[0]
+    omap_oid = struct.unpack_from('<Q', data, 160)[0]    # nx_omap_oid
+    # fs_oid array starts at offset 184, up to 100 volumes
+    fs_oids = []
+    for i in range(100):
+        off = 184 + i * 8
+        if off + 8 > len(data):
+            break
+        oid = struct.unpack_from('<Q', data, off)[0]
+        if oid == 0:
+            break
+        fs_oids.append(oid)
+    return {'block_size': block_size, 'block_count': block_count,
+            'omap_oid': omap_oid, 'fs_oids': fs_oids}
+
+
+def _apfs_omap_lookup(fh, omap_root_paddr: int, oid: int, block_size: int) -> int:
+    """Walk the container omap B-tree to resolve oid -> paddr.
+    Returns physical block address or 0 on failure."""
+    MAX_DEPTH = 6
+    paddr = omap_root_paddr
+
+    for _ in range(MAX_DEPTH):
+        data = _apfs_read_block(fh, paddr, block_size)
+        if len(data) < 56:
+            return 0
+        # btree_node_phys_t: flags at offset 40 (u16)
+        flags = struct.unpack_from('<H', data, 40)[0]
+        nkeys = struct.unpack_from('<H', data, 42)[0]
+        # leaf = bit 0 set in flags, root = bit 1
+        is_leaf = bool(flags & 0x4)  # BTNODE_LEAF = 0x0004
+
+        # Key/value area starts at offset 56 for non-root, 88 for root btree
+        # table-of-contents (toc) starts immediately after the header (56 bytes)
+        # Each toc entry: key_off(u16) key_len(u16) val_off(u16) val_len(u16)
+        header_size = 56
+        toc_off = header_size
+
+        best_paddr = 0
+        best_oid = 0
+
+        for i in range(min(nkeys, 512)):
+            entry_off = toc_off + i * 8
+            if entry_off + 8 > len(data):
+                break
+            k_off, k_len, v_off, v_len = struct.unpack_from('<HHHH', data, entry_off)
+            # keys start right after toc; toc area = nkeys*8 bytes
+            key_base = toc_off + nkeys * 8
+            key_abs = key_base + k_off
+            if key_abs + 8 > len(data):
+                continue
+            entry_oid = struct.unpack_from('<Q', data, key_abs)[0]
+            if entry_oid > oid:
+                break
+            if entry_oid <= oid:
+                best_oid = entry_oid
+                if is_leaf:
+                    val_base = len(data)  # values grow from end
+                    val_abs = val_base - v_off
+                    if val_abs + 8 <= len(data):
+                        best_paddr = struct.unpack_from('<Q', data, val_abs)[0]
+                else:
+                    val_base = len(data)
+                    val_abs = val_base - v_off
+                    if val_abs + 8 <= len(data):
+                        best_paddr = struct.unpack_from('<Q', data, val_abs)[0]
+
+        if best_paddr == 0:
+            return 0
+        if is_leaf:
+            return best_paddr if best_oid == oid else 0
+        paddr = best_paddr
+
+    return 0
+
+
+def _apfs_parse_fs_super(data: bytes) -> Optional[dict]:
+    """Parse apfs_superblock_t (APSB block)."""
+    if len(data) < 512:
+        return None
+    magic = data[32:36]
+    if magic != _APFS_FS_MAGIC:
+        return None
+    omap_oid   = struct.unpack_from('<Q', data, 160)[0]   # apfs_omap_oid
+    root_tree_oid = struct.unpack_from('<Q', data, 168)[0] # apfs_root_tree_oid
+    inode_count = struct.unpack_from('<Q', data, 288)[0]
+    return {'omap_oid': omap_oid, 'root_tree_oid': root_tree_oid, 'inode_count': inode_count}
+
+
+def _apfs_iter_fs_tree(fh, root_paddr: int, block_size: int,
+                        omap_paddr: int) -> List[dict]:
+    """Walk the filesystem B-tree, yielding inode + extent records."""
+    results = []
+    stack = [root_paddr]
+    visited: set = set()
+    MAX_NODES = 50000
+
+    while stack and len(visited) < MAX_NODES:
+        paddr = stack.pop()
+        if paddr in visited or paddr == 0:
+            continue
+        visited.add(paddr)
+
+        data = _apfs_read_block(fh, paddr, block_size)
+        if len(data) < 56:
+            continue
+
+        flags = struct.unpack_from('<H', data, 40)[0]
+        nkeys = struct.unpack_from('<H', data, 42)[0]
+        is_leaf = bool(flags & 0x4)
+        is_root = bool(flags & 0x2)
+
+        toc_off = 56
+        key_base = toc_off + nkeys * 8
+
+        for i in range(min(nkeys, 1024)):
+            entry_off = toc_off + i * 8
+            if entry_off + 8 > len(data):
+                break
+            k_off, k_len, v_off, v_len = struct.unpack_from('<HHHH', data, entry_off)
+            key_abs = key_base + k_off
+            if key_abs + k_len > len(data) or k_len < 8:
+                continue
+
+            # Key layout: obj_id_and_type (u64) = oid(60 bits) | type(4 bits high)
+            oid_type_raw = struct.unpack_from('<Q', data, key_abs)[0]
+            obj_id  = oid_type_raw & 0x0FFFFFFFFFFFFFFF
+            obj_type = (oid_type_raw >> 60) & 0xF
+
+            val_abs = len(data) - v_off
+            if val_abs + v_len > len(data) or val_abs < 0:
+                continue
+
+            if is_leaf:
+                if obj_type == _APFS_INODE_TYPE and v_len >= 88:
+                    # inode_val_t: parent_id(8) private_id(8) create_time(8) mod_time(8)
+                    # change_time(8) access_time(8) internal_flags(8)
+                    # nchildren_or_nlink(4) default_prot_class(4) write_gen_counter(4)
+                    # bsd_flags(4) uid(4) gid(4) mode(2) pad1(2) uncompressed_size(8)
+                    # then xfields
+                    try:
+                        inode_size = struct.unpack_from('<Q', data, val_abs + 56)[0]  # uncompressed_size offset ~56 in val
+                        # Actually: parent_id(8)+private_id(8)+ctime(8)+mtime(8)+chgtime(8)+acctime(8)+flags(8)+nlink(4)+defprot(4)+wgen(4)+bsdflags(4)+uid(4)+gid(4)+mode(2)+pad1(2)+uncomp_size(8) = 96 bytes before xfields
+                        if v_len >= 96:
+                            inode_size = struct.unpack_from('<Q', data, val_abs + 88)[0]
+                        mode = struct.unpack_from('<H', data, val_abs + 80)[0] if v_len >= 82 else 0
+                        if (mode & 0xF000) == 0x8000 and inode_size >= MIN_FILE:
+                            results.append({'obj_id': obj_id, 'size': inode_size,
+                                           'type': 'inode', 'extents': []})
+                    except Exception:
+                        pass
+
+                elif obj_type == _APFS_EXTENT_TYPE and v_len >= 16:
+                    # file_extent_val_t: len_and_flags(8) phys_block_num(8) crypto_id(8)
+                    try:
+                        len_flags = struct.unpack_from('<Q', data, val_abs)[0]
+                        phys_blk  = struct.unpack_from('<Q', data, val_abs + 8)[0]
+                        ext_len   = len_flags & 0x00FFFFFFFFFFFFFF
+                        logical_off = 0
+                        # key for extent: oid(60) | type(4) then file_offset(8)
+                        if k_len >= 16:
+                            logical_off = struct.unpack_from('<Q', data, key_abs + 8)[0]
+                        results.append({'obj_id': obj_id, 'type': 'extent',
+                                       'phys_blk': phys_blk, 'ext_len': ext_len,
+                                       'logical_off': logical_off})
+                    except Exception:
+                        pass
+
+                elif obj_type == _APFS_DREC_TYPE and v_len >= 18:
+                    # drec_val_t: file_id(8) date_added(8) flags(2) xfields...
+                    try:
+                        child_id = struct.unpack_from('<Q', data, val_abs)[0]
+                        # name from key after the 8-byte oid+type and 4-byte hash
+                        name_off = key_abs + 12
+                        name_end = key_abs + k_len
+                        raw_name = data[name_off:name_end]
+                        name = raw_name.split(b'\x00')[0].decode('utf-8', errors='replace')
+                        results.append({'obj_id': child_id, 'type': 'drec', 'name': name})
+                    except Exception:
+                        pass
+            else:
+                # Internal node: value is child paddr
+                if val_abs + 8 <= len(data):
+                    try:
+                        child_oid = struct.unpack_from('<Q', data, val_abs)[0]
+                        # resolve via omap if needed
+                        child_paddr = _apfs_omap_lookup(fh, omap_paddr, child_oid, block_size) if omap_paddr else child_oid
+                        if child_paddr > 0:
+                            stack.append(child_paddr)
+                    except Exception:
+                        pass
+
+    return results
+
+
+def scan_apfs_volume(device_path: str, out_path: Path,
+                     start_id: int = 0) -> int:
+    """APFS B-tree scanner: reads container -> omap -> FS tree -> inodes+extents."""
+    fh, err = open_raw_device(device_path)
+    if not fh:
+        log_err(f'APFS scan open failed: {err}')
+        return start_id
+
+    file_id = start_id
+    try:
+        # Try block 0 first, then common offsets (GPT partition etc.)
+        for base_block in [0, 1, 2]:
+            block0 = _apfs_read_block(fh, base_block, 4096)
+            if len(block0) >= 36 and block0[32:36] == _APFS_NX_MAGIC2:
+                break
+        else:
+            return start_id
+
+        nx = _apfs_parse_nx_super(block0)
+        if not nx:
+            return start_id
+
+        bsz = nx['block_size']
+        log_err(f'APFS container found: block_size={bsz} fs_count={len(nx["fs_oids"])}')
+        emit('progress', {'percent': 2, 'finished': False, 'filesFound': file_id - start_id,
+                          'currentPath': 'APFS container detected', 'engine': 'apfs'})
+
+        # Resolve container omap
+        omap_block = _apfs_read_block(fh, nx['omap_oid'], bsz)
+        # omap_phys_t: magic(4) at +32, tree_oid at +48 (root of the omap btree as physical addr)
+        omap_tree_paddr = 0
+        if len(omap_block) >= 56 and omap_block[32:36] in (b'PAMB', b'BMAP'):
+            omap_tree_paddr = struct.unpack_from('<Q', omap_block, 48)[0]
+
+        # Walk each APFS volume
+        for vol_idx, fs_oid in enumerate(nx['fs_oids'][:8]):
+            fs_paddr = _apfs_omap_lookup(fh, omap_tree_paddr or nx['omap_oid'], fs_oid, bsz) if omap_tree_paddr else fs_oid
+            if fs_paddr == 0:
+                fs_paddr = fs_oid  # fallback: treat as physical
+
+            fs_block = _apfs_read_block(fh, fs_paddr, bsz)
+            fs_super = _apfs_parse_fs_super(fs_block)
+            if not fs_super:
+                continue
+
+            log_err(f'APFS volume {vol_idx}: root_tree_oid={fs_super["root_tree_oid"]}')
+
+            # Resolve volume omap
+            vol_omap_block = _apfs_read_block(fh, fs_super['omap_oid'], bsz)
+            vol_omap_paddr = 0
+            if len(vol_omap_block) >= 56:
+                vol_omap_paddr = struct.unpack_from('<Q', vol_omap_block, 48)[0]
+
+            # Resolve root tree physical address
+            root_paddr = _apfs_omap_lookup(fh, vol_omap_paddr or fs_super['omap_oid'],
+                                            fs_super['root_tree_oid'], bsz) if vol_omap_paddr else fs_super['root_tree_oid']
+            if root_paddr == 0:
+                root_paddr = fs_super['root_tree_oid']
+
+            records = _apfs_iter_fs_tree(fh, root_paddr, bsz, vol_omap_paddr)
+
+            # Build name map from drec records
+            names: Dict[int, str] = {}
+            for r in records:
+                if r['type'] == 'drec' and r.get('name'):
+                    names[r['obj_id']] = r['name']
+
+            # Build extent map: obj_id -> list of (logical_off, phys_blk, ext_len)
+            extents_map: Dict[int, List[Tuple[int, int, int]]] = {}
+            for r in records:
+                if r['type'] == 'extent':
+                    oid = r['obj_id']
+                    if oid not in extents_map:
+                        extents_map[oid] = []
+                    extents_map[oid].append((r['logical_off'], r['phys_blk'], r['ext_len']))
+
+            # Process inodes
+            out_path.mkdir(parents=True, exist_ok=True)
+            for r in records:
+                if r['type'] != 'inode':
+                    continue
+                oid = r['obj_id']
+                size = r['size']
+                name = names.get(oid, f'apfs_{file_id:06d}_ino{oid}')
+                # sanitize name
+                name = name.replace('/', '_').replace('..', '_')
+                if not name:
+                    name = f'apfs_{file_id:06d}'
+
+                exts = sorted(extents_map.get(oid, []), key=lambda x: x[0])
+                if not exts:
+                    continue
+
+                # Guess extension from first block
+                first_block = _apfs_read_block(fh, exts[0][1], bsz) if exts[0][1] > 0 else b''
+                guessed_ext = _guess_ext_from_head(first_block[:64])
+                dot = name.rfind('.')
+                if dot > 0:
+                    guessed_ext = name[dot+1:].lower()
+
+                dest = out_path / f'apfs_{file_id:06d}_{name}'
+                remaining = size
+                written = 0
+                try:
+                    with open(dest, 'wb') as wf:
+                        for log_off, phys_blk, ext_len in exts:
+                            if remaining <= 0:
+                                break
+                            run_bytes = min(remaining, ext_len)
+                            fh.seek(phys_blk * bsz)
+                            left = run_bytes
+                            while left > 0:
+                                chunk = fh.read(min(524288, left))
+                                if not chunk:
+                                    break
+                                wf.write(chunk)
+                                written += len(chunk)
+                                left -= len(chunk)
+                            remaining -= run_bytes
+                    if written < MIN_FILE:
+                        try:
+                            dest.unlink()
+                        except Exception:
+                            pass
+                        continue
+                except Exception as e:
+                    log_err(f'APFS write error {dest}: {e}')
+                    continue
+
+                conf = 0.80 if written >= size * 0.9 else 0.55
+                rec = {
+                    'id': file_id, 'name': name,
+                    'extension': guessed_ext, 'size': size,
+                    'type': type_for_ext(guessed_ext),
+                    'status': 1, 'confidence': conf,
+                    'path': str(dest), 'outputPath': str(dest),
+                    'source': 'apfs_btree',
+                }
+                rec['health'] = compute_health(rec, file_id)
+                emit('file-found', rec)
+                file_id += 1
+
+                if file_id % 100 == 0:
+                    pct = min(95, 10 + int((file_id - start_id) / max(1, fs_super['inode_count']) * 80))
+                    emit('progress', {'percent': pct, 'finished': False, 'filesFound': file_id - start_id,
+                                      'currentPath': str(dest.name), 'engine': 'apfs'})
+
+        emit('progress', {'percent': 98, 'finished': False, 'filesFound': file_id - start_id,
+                          'currentPath': 'APFS scan complete', 'engine': 'apfs'})
+    except Exception as e:
+        log_err(f'APFS scan error: {e}')
+    finally:
+        try:
+            fh.close()
+        except Exception:
+            pass
+
+    return file_id
+
+
 def cmd_scan(device_path: str, out_dir: str, deep_scan: bool = False):
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -1166,6 +1952,22 @@ def cmd_scan(device_path: str, out_dir: str, deep_scan: bool = False):
             pre_after_ext = scan_ext_volume(device_path, out_path, start_id=pre_count)
         except Exception as e:
             log_err(f'ext pre-pass failed: {e}')
+
+    # macOS / APFS image pre-pass
+    pre_after_apfs = pre_after_ext
+    try:
+        pre_after_apfs = scan_apfs_volume(device_path, out_path, start_id=pre_after_ext)
+    except Exception as e:
+        log_err(f'APFS pre-pass failed: {e}')
+    pre_after_ext = pre_after_apfs
+
+    # macOS / APFS image pre-pass
+    pre_after_apfs = pre_after_ext
+    try:
+        pre_after_apfs = scan_apfs_volume(device_path, out_path, start_id=pre_after_ext)
+    except Exception as e:
+        log_err(f'APFS pre-pass failed: {e}')
+    pre_after_ext = pre_after_apfs
 
     fh, err = open_raw_device(device_path)
     if fh:
