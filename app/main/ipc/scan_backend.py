@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import base64
 import json
 import os
@@ -731,7 +732,7 @@ def run_logical_scan(out_path: Path, start_id: int = 0) -> int:
     return file_id
 
 
-def cmd_scan(device_path: str, out_dir: str):
+def cmd_scan(device_path: str, out_dir: str, deep_scan: bool = False):
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
@@ -763,7 +764,11 @@ def cmd_scan(device_path: str, out_dir: str):
         log_err(f'Engine: Python raw carver on {device_path}')
         emit('progress', {'percent': 10 if pre_count else 0, 'finished': False, 'filesFound': pre_count,
                           'currentPath': f'Raw carving {device_path}...', 'engine': 'raw_carve'})
-        run_raw_carver(fh, out_path, start_id=pre_count)
+        end_id = run_raw_carver(fh, out_path, start_id=pre_count)
+        if deep_scan:
+            emit('progress', {'percent': 98, 'finished': False, 'filesFound': end_id,
+                              'currentPath': 'Deep scan: logical pass', 'engine': 'deep_scan'})
+            run_logical_scan(out_path, start_id=end_id)
         return
 
     log_err(f'Engine: Logical scan (raw denied: {err})')
@@ -1104,6 +1109,23 @@ def _recover_ntfs_mft_file(file_obj: dict, dest: Path) -> bool:
             pass
 
 
+
+def _file_hashes(path: Path) -> dict:
+    if not path.exists() or not path.is_file():
+        return {'md5': '', 'sha256': '', 'bytes': 0}
+    md5 = hashlib.md5()
+    sha = hashlib.sha256()
+    total = 0
+    with open(path, 'rb') as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            md5.update(chunk)
+            sha.update(chunk)
+    return {'md5': md5.hexdigest(), 'sha256': sha.hexdigest(), 'bytes': total}
+
 def cmd_recover(file_obj: dict, out_dir: str):
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -1127,7 +1149,8 @@ def cmd_recover(file_obj: dict, out_dir: str):
             except Exception as e:
                 log_err(f'Copy error: {e}')
 
-    print(json.dumps({'success': success, 'outputPath': str(dest), 'health': file_obj.get('health')}))
+    hashes = _file_hashes(dest) if success else {'md5': '', 'sha256': '', 'bytes': 0}
+    print(json.dumps({'success': success, 'outputPath': str(dest), 'health': file_obj.get('health'), 'hashes': hashes}))
 def cmd_repair(args_obj: dict):
     file_obj = args_obj.get('file') or {}
     out_dir = args_obj.get('outputDir') or str(Path.home() / 'LazarusRecovered')
@@ -1203,6 +1226,7 @@ def main():
     p_scan = sub.add_parser('scan')
     p_scan.add_argument('--device', default=r'\\.\PhysicalDrive0')
     p_scan.add_argument('--output-dir', default=str(Path.home() / 'LazarusRecovered'))
+    p_scan.add_argument('--deep-scan', action='store_true')
 
     p_rec = sub.add_parser('recover')
     p_rec.add_argument('--file-json', required=True)
@@ -1223,7 +1247,7 @@ def main():
     if args.cmd == 'enumerate':
         print(json.dumps(enumerate_drives()))
     elif args.cmd == 'scan':
-        cmd_scan(args.device, args.output_dir)
+        cmd_scan(args.device, args.output_dir, bool(args.deep_scan))
     elif args.cmd == 'recover':
         cmd_recover(json.loads(args.file_json), args.output_dir or str(Path.home()))
     elif args.cmd == 'analyze':

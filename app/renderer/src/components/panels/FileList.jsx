@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useMemo } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useAppStore }    from '../../stores/useAppStore';
 import {
@@ -19,9 +19,15 @@ function fmtSz(n){ if(!n)return'0 B';if(n<1024)return n+' B';if(n<1048576)return
 const FILTERS=[{id:'all',label:'All'},{id:'images',label:'Images'},{id:'videos',label:'Videos'},{id:'audio',label:'Audio'},{id:'documents',label:'Documents'},{id:'archives',label:'Archives'}];
 
 export default function FileList(){
-  const { filteredFiles,selectedFile,selectFile,filter,setFilter,addToast }=useAppStore();
+  const { files,filteredFiles,selectedFile,selectFile,filter,setFilter,addToast }=useAppStore();
   const [selected,setSelected]=useState(new Set());
   const parentRef=useRef(null);
+
+  const sourceOptions=useMemo(()=>{
+    const sset=new Set(['all']);
+    for(const f of files||[]) sset.add(f.source||'unknown');
+    return Array.from(sset);
+  },[files]);
 
   const rv=useVirtualizer({
     count:filteredFiles.length,
@@ -82,6 +88,13 @@ export default function FileList(){
             onChange={e=>setFilter({ext:e.target.value.replace(/^\.\.*/,'').toLowerCase()})}
             className="flex-1 bg-surface-2 border border-border rounded-lg px-2 py-0.5 text-xs text-text outline-none focus:border-primary/50"/>
         </div>
+        <div className="flex items-center gap-2 px-1">
+          <span className="text-xs text-text-dim whitespace-nowrap">Source</span>
+          <select value={filter.source||'all'} onChange={e=>setFilter({source:e.target.value})}
+            className="flex-1 bg-surface-2 border border-border rounded-lg px-2 py-0.5 text-xs text-text outline-none focus:border-primary/50">
+            {sourceOptions.map(src=><option key={src} value={src}>{src}</option>)}
+          </select>
+        </div>
       </div>
 
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-surface-border bg-bg-2 text-xs text-text-dim">
@@ -125,6 +138,7 @@ export default function FileList(){
                     <div className="flex items-center gap-1.5 text-xs text-text-dim mt-0.5">
                       <span className={ST_COLORS[f.status]}>{ST_LABELS[f.status]}</span>
                       <span>·</span><span>{fmtSz(f.size)}</span>
+                      <span>·</span><span className="uppercase text-[10px] text-primary/80">{f.source||'unknown'}</span>
                       {rm>0&&(<span className="flex items-center gap-0.5 ml-1">
                         {rm===1?<Wrench size={11} className="text-yellow-400"/>:rm===2?<AlertTriangle size={11} className="text-orange-400"/>:<RefreshCcw size={11} className="text-red-400"/>}
                         <span className={clsx('text-[10px]',rm===1?'text-yellow-400':rm===2?'text-orange-400':'text-red-400')}>{rm===1?'Minor':rm===2?'Major':'Rebuild'}</span>

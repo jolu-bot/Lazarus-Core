@@ -29,7 +29,7 @@ export const useAppStore = create(
     }),
     clearFiles: () => set({ files: [], filteredFiles: [] }),
 
-    filter: { type: 'all', search: '', statusDeleted: false, minHealth: 0, ext: '', minSize: 0, maxSize: 0 },
+    filter: { type: 'all', source: 'all', search: '', statusDeleted: false, minHealth: 0, ext: '', minSize: 0, maxSize: 0 },
     setFilter: (f) => set((s) => {
       const filter = { ...s.filter, ...f };
       return { filter, filteredFiles: applyFilter(s.files, filter) };
@@ -94,6 +94,7 @@ function applyFilter(files, filter) {
       if (f.type !== typeMap[filter.type]) return false;
     }
     if (filter.statusDeleted && f.status !== 1) return false;
+    if (filter.source !== 'all' && (f.source || 'unknown') !== filter.source) return false;
     if (filter.search) {
       const q = filter.search.toLowerCase();
       if (!f.name.toLowerCase().includes(q)) return false;
