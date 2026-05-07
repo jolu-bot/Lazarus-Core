@@ -1,6 +1,6 @@
-import React from 'react';
+﻿import React from 'react';
 import { motion }      from 'framer-motion';
-import { HardDrive, Settings, Clock } from 'lucide-react';
+import { HardDrive, Settings, Clock, Sparkles } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
 import clsx            from 'clsx';
 
