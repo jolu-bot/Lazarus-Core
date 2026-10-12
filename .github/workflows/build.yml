@@ -14,64 +14,67 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: 3.12
-      - name: Install Python AI deps
-        run: pip install numpy opencv-python-headless pillow fastapi uvicorn python-multipart aiofiles
-        working-directory: ai
-      - name: Install app deps
-        run: npm ci --legacy-peer-deps
+          python-version: '3.12'
+      - name: Dépendances du moteur
+        run: pip install -r app/main/ipc/requirements.txt
+      - name: Tests du moteur
+        run: python -m unittest discover -s tests/engine -p "test_*.py"
+      - name: Dépendances de l'application
+        run: npm ci || npm install
         working-directory: app
-      - name: Install renderer deps
-        run: npm ci --legacy-peer-deps
+      - name: Interface
+        run: npm install && npm run build
         working-directory: app/renderer
-      - name: Build renderer
-        run: npm run build
-        working-directory: app/renderer
-      - name: Build Windows NSIS installer
+      - name: Gel du moteur Python (exécutable autonome)
+        run: node scripts/build-engine.js
+      - name: Installateur Windows
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
         run: npx electron-builder --win nsis --publish always
         working-directory: app
-      - name: Upload Windows artifact
+      - name: Artefact Windows
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer
-          path: app/dist/*.exe
+          path: app/dist-build/*.exe
 
   build-macos:
     name: macOS DMG
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Install app deps
-        run: npm ci --legacy-peer-deps
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Dépendances du moteur
+        run: pip install -r app/main/ipc/requirements.txt
+      - name: Tests du moteur
+        run: python -m unittest discover -s tests/engine -p "test_*.py"
+      - name: Dépendances de l'application
+        run: npm ci || npm install
         working-directory: app
-      - name: Install renderer deps
-        run: npm ci --legacy-peer-deps
+      - name: Interface
+        run: npm install && npm run build
         working-directory: app/renderer
-      - name: Build renderer
-        run: npm run build
-        working-directory: app/renderer
-      - name: Build macOS DMG
+      - name: Gel du moteur Python
+        run: node scripts/build-engine.js
+      - name: DMG macOS
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
         run: npx electron-builder --mac dmg --publish always
         working-directory: app
-      - name: Upload macOS artifact
+      - name: Artefact macOS
         uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
-          path: app/dist/*.dmg
+          path: app/dist-build/*.dmg

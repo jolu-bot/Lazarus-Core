@@ -1,6 +1,6 @@
 {
   "name": "lazarus-core-monorepo",
-  "version": "1.0.0",
+  "version": "2.1.0",
   "private": true,
   "scripts": {
     "install:all": "npm run install:app && npm run install:renderer",
@@ -10,7 +10,11 @@
     "build": "cd app && npm run build",
     "build:win": "cd app && npm run build:win",
     "build:mac": "cd app && npm run build:mac",
+    "build:engine": "node scripts/build-engine.js",
     "build:native": "cd core && node-gyp rebuild",
+    "test": "npm run test:engine && npm run test:bridge",
+    "test:engine": "python -m unittest discover -s tests/engine -p \"test_*.py\"",
+    "test:bridge": "node --test tests/bridge/bridge.test.js",
     "install:ai": "cd ai && pip install -r requirements.txt",
     "start:ai": "cd ai && python server.py",
     "clean": "node scripts/clean.js"

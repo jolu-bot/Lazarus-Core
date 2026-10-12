@@ -9,12 +9,12 @@ const Store = require('electron-store');
 const store = new Store();
 
 const { setupLicenseIPC } = require('./ipc/license');
-const { setupScanIPC, setupDriveWatcher } = require('./ipc/scan');
+const { setupScanIPC, setupDriveWatcher, stopEverything } = require('./ipc/scan');
 const { setupPaymentIPC } = require('./ipc/payment');
 const { setupAIIPC } = require('./ipc/ai');
 const { startAIServer, stopAIServer } = require('./ai_process');
 
-const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
+const isDev = process.env.NODE_ENV === 'development' || process.argv.includes('--dev');
 const RENDERER_URL = isDev ? 'http://localhost:3000' : null;
 
 if (!isDev) {
@@ -22,7 +22,6 @@ if (!isDev) {
   process.noDeprecation = true;
 }
 
-app.disableHardwareAcceleration = false;
 if (!app.requestSingleInstanceLock()) {
   app.quit();
   process.exit(0);
@@ -48,10 +47,16 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       webSecurity: true,
       allowRunningInsecureContent: false,
     },
+  });
+
+  // Aucune navigation ni fenêtre externe depuis l'interface (défense en profondeur)
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (e, url) => {
+    if (!url.startsWith('file://') && !url.startsWith('http://localhost:3000')) e.preventDefault();
   });
 
   if (RENDERER_URL) {
@@ -159,6 +164,7 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  stopEverything();
 });
 
 app.on('window-all-closed', () => {
@@ -204,7 +210,19 @@ ipcMain.handle('dialog:saveFile', async (_, defaultName) => {
   return result.canceled ? null : result.filePath;
 });
 
+ipcMain.handle('dialog:openFile', async (_, opts) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: (opts && opts.filters) || [
+      { name: 'Images disque', extensions: ['img', 'dd', 'raw', 'bin', 'iso', 'vhd', 'e01'] },
+      { name: 'Tous les fichiers', extensions: ['*'] },
+    ],
+  });
+  return result.canceled ? null : result.filePaths[0];
+});
+
 ipcMain.handle('shell:openPath', async (_, p) => shell.openPath(p));
+ipcMain.handle('shell:showItem', async (_, p) => { shell.showItemInFolder(p); return true; });
 ipcMain.handle('app:getVersion', () => app.getVersion());
 ipcMain.handle('app:getPlatform', () => process.platform);
 ipcMain.handle('app:getSettings', () => store.get('settings', { threads: 0, bufferMB: 4, outputDir: '' }));
@@ -246,16 +264,13 @@ ipcMain.handle('app:export-files', async (_, data) => {
   if (res.canceled) return null;
 
   if (format === 'csv') {
-    const header = 'name,type,size,status,health,path';
+    const q = (v) => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+    const header = 'nom,extension,taille,statut,sante,moteur,chemin,md5,sha256';
     const rows = files.map((f) => [
-      f.name || '',
-      f.type || 0,
-      f.size || 0,
-      f.status || 0,
-      (f.health && f.health.score) || 0,
-      f.path || '',
+      q(f.name), q(f.extension), f.size || 0, f.status || 0, (f.health && f.health.score) || 0,
+      q(f.source), q(f.path), q(f.md5), q(f.sha256),
     ].join(','));
-    fs.writeFileSync(res.filePath, [header, ...rows].join('\n'), 'utf8');
+    fs.writeFileSync(res.filePath, '﻿' + [header, ...rows].join('\r\n'), 'utf8');
   } else {
     fs.writeFileSync(res.filePath, JSON.stringify(files, null, 2), 'utf8');
   }

@@ -1,9 +1,11 @@
 import React from 'react';
 import { Minus, Square, X, Cpu } from 'lucide-react';
+import { useT } from '../../i18n';
 
 const lzr = window.lazarus;
 
 export default function TitleBar() {
+  const t = useT();
   return (
     <div className="drag-region flex items-center justify-between h-10 px-4
                     bg-bg-2 border-b border-surface-border flex-shrink-0 z-50">
@@ -16,13 +18,13 @@ export default function TitleBar() {
         <span className="text-sm font-semibold text-text tracking-wide">
           LAZARUS CORE
         </span>
-        <span className="text-xs text-text-dim font-mono ml-1">v1.0</span>
+        <span className="text-xs text-text-dim font-mono ml-1">v2.1</span>
       </div>
 
       {/* Center: Tagline */}
       <span className="text-xs text-text-dim font-mono tracking-widest
                        drag-region select-none">
-        RECOVER THE IMPOSSIBLE
+        {t('app.tagline')}
       </span>
 
       {/* Right: Window controls */}

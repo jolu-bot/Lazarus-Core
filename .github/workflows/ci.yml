@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Dépendances du moteur
+        run: pip install -r app/main/ipc/requirements.txt
+      - name: Tests du moteur (NTFS, FAT, exFAT, ext, carving, partitions, imagerie)
+        run: python -m unittest discover -s tests/engine -p "test_*.py"
+      - name: Dépendances de l'application
+        run: npm ci || npm install
+        working-directory: app
+      - name: Interface
+        run: npm install && npm run build
+        working-directory: app/renderer
+      - name: Test d'intégration du pont Electron <-> moteur
+        run: node --test tests/bridge/bridge.test.js

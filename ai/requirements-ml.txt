@@ -1,0 +1,5 @@
+# Optionnel : reconstruction d'image par réseau de neurones (le serveur fonctionne sans, via OpenCV)
+-r requirements.txt
+torch>=2.3
+torchvision>=0.18
+scikit-image>=0.23

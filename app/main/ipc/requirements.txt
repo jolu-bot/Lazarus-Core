@@ -1,0 +1,2 @@
+# Dépendances du moteur de récupération (tout le reste est la bibliothèque standard de Python)
+cryptography>=42        # déverrouillage BitLocker (AES-XTS / AES-CCM) ; optionnel hors BitLocker

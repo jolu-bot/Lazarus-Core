@@ -4,11 +4,12 @@ export default {
   theme: {
     extend: {
       colors: {
-        bg:      { DEFAULT: '#0A0A0F', 2: '#12121A', 3: '#1A1A26' },
-        surface: { DEFAULT: '#16161F', 2: '#1E1E2E', border: '#2A2A3E' },
-        primary: { DEFAULT: '#6C63FF', hover: '#7D75FF', glow: '#6C63FF33' },
-        accent:  { DEFAULT: '#FF6B6B', green: '#4ECDC4', yellow: '#FFE66D' },
-        text:    { DEFAULT: '#E8E8F0', muted: '#8888A8', dim: '#55556A' },
+        // Les couleurs sont des variables CSS (voir globals.css) : thème sombre/clair sans dupliquer les composants.
+        bg:      { DEFAULT: 'rgb(var(--c-bg) / <alpha-value>)', 2: 'rgb(var(--c-bg-2) / <alpha-value>)', 3: 'rgb(var(--c-bg-3) / <alpha-value>)' },
+        surface: { DEFAULT: 'rgb(var(--c-surface) / <alpha-value>)', 2: 'rgb(var(--c-surface-2) / <alpha-value>)', border: 'rgb(var(--c-border) / <alpha-value>)' },
+        primary: { DEFAULT: 'rgb(var(--c-primary) / <alpha-value>)', hover: 'rgb(var(--c-primary-hover) / <alpha-value>)', glow: '#6C63FF33' },
+        accent:  { DEFAULT: 'rgb(var(--c-accent) / <alpha-value>)', green: 'rgb(var(--c-green) / <alpha-value>)', yellow: 'rgb(var(--c-yellow) / <alpha-value>)' },
+        text:    { DEFAULT: 'rgb(var(--c-text) / <alpha-value>)', muted: 'rgb(var(--c-text-muted) / <alpha-value>)', dim: 'rgb(var(--c-text-dim) / <alpha-value>)' },
       },
       fontFamily: {
         sans: ['"Inter"', 'system-ui', 'sans-serif'],

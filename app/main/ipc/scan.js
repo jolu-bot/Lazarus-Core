@@ -1,521 +1,606 @@
-﻿'use strict';
+'use strict';
+/**
+ * Pont entre l'interface et le moteur Python (scan_backend.py).
+ * - une seule opération lourde à la fois (analyse / récupération / imagerie) ;
+ * - évènements « file-found » regroupés en lots pour ne pas saturer l'IPC ;
+ * - arrêt propre via stdin (« stop »), puis arrêt forcé si le moteur ne répond pas ;
+ * - sessions d'analyse sauvegardées (JSONL) : un scan de plusieurs heures n'est jamais perdu.
+ */
 const path = require('path');
 const os   = require('os');
-const fss  = require('fs');
+const fs   = require('fs');
 const cp   = require('child_process');
 
-let nativeAddon = null;
-try { nativeAddon = require('../../native/lazarus_core.node'); }
-catch (e) { console.warn('Native addon:', e.message); }
-
-// ─── Persistent log ──────────────────────────────────────────────────────────
+// ─── Journal persistant ──────────────────────────────────────────────────────
 let _logPath = null;
+function userDataDir() {
+  try { return require('electron').app.getPath('userData'); }
+  catch (_) { return path.join(os.homedir(), '.lazarus-core'); }
+}
 function getLogPath() {
-  if (_logPath) return _logPath;
-  try {
-    const { app } = require('electron');
-    _logPath = path.join(app.getPath('userData'), 'lazarus-scan.log');
-  } catch(_) {
-    _logPath = path.join(os.homedir(), 'lazarus-scan.log');
-  }
+  if (!_logPath) _logPath = path.join(userDataDir(), 'lazarus-engine.log');
   return _logPath;
 }
 function appendLog(line) {
   try {
-    fss.appendFileSync(getLogPath(), '[' + new Date().toISOString() + '] ' + line + '\n', 'utf8');
-  } catch(_) {}
+    fs.mkdirSync(path.dirname(getLogPath()), { recursive: true });
+    const p = getLogPath();
+    try { if (fs.statSync(p).size > 5 * 1024 * 1024) fs.renameSync(p, p + '.old'); } catch (_) {}
+    fs.appendFileSync(p, '[' + new Date().toISOString() + '] ' + line + '\n', 'utf8');
+  } catch (_) {}
 }
 
-// ─── Active scan process (for watchdog + stop) ───────────────────────────────
-let activeScanProcess = null;
-
-// ─── Seeded RNG ───────────────────────────────────────────────────────────────
-function pseudoRandom(seed) {
-  var s = seed + 1;
-  return function(max) {
-    s = (s * 1664525 + 1013904223) & 0xffffffff;
-    return ((s >>> 0) / 4294967296) * max;
-  };
+// ─── Localisation du moteur ──────────────────────────────────────────────────
+function getIpcDir() {
+  // En production les scripts sont « unpacked » hors de l'archive asar.
+  return __dirname.replace(/app\.asar(?=[\\/]|$)/, 'app.asar.unpacked');
 }
 
-function computeHealth(file, seed) {
-  var conf = file.confidence || 0;
-  var st   = file.status || 0;
-  var rng  = pseudoRandom(seed || file.id || 0);
-  var score = Math.round(conf * 100);
-  if (st === 1) score = Math.min(score, 93);
-  if (st === 2) score = Math.min(score, 74);
-  if (st === 3) score = Math.min(score, 56);
-  var headerOk  = conf >= 0.65;
-  var structPct = st===0?100:(st===2?Math.round(conf*70):st===3?Math.round(conf*55):Math.round(conf*88));
-  var dataPct   = st===0?100:(st===2?Math.round(conf*80):st===3?Math.round(conf*65):Math.round(conf*92));
-  var frags     = st===2?(2+(rng(6)|0)):st===3?(1+(rng(3)|0)):1;
-  var repairMode = score>=85?0:score>=70?1:score>=50?2:3;
-  var labels = ['Excellent','Good - minor repair','Degraded - repair needed','Critical - reconstruct'];
-  return { score:score, headerOk:headerOk, structPct:structPct, dataPct:dataPct,
-           frags:frags, repairMode:repairMode, label:labels[repairMode], existsOnDisk:st===0 };
+let _engine = null;
+function pythonWorks(cmd, pre) {
+  try {
+    const r = cp.spawnSync(cmd, [...pre, '-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)'],
+      { timeout: 8000, windowsHide: true });
+    return r.status === 0;
+  } catch (_) { return false; }
 }
 
-// ─── Windows drive enumeration ────────────────────────────────────────────────
-function getWindowsDrives() {
-  return new Promise(function(resolve) {
-    cp.exec('wmic diskdrive get DeviceID,Model,Size,InterfaceType,SerialNumber /format:csv',
-      { timeout: 4000 },
-      function(err, stdout) {
-        if (err) { resolve(getMockDrives()); return; }
-        var drives = [];
-        var lines = stdout.split('\n').filter(function(l) {
-          return l.trim() && !l.trim().startsWith('Node');
-        });
-        lines.forEach(function(line) {
-          var p = line.split(',');
-          if (p.length < 6) return;
-          var devId = p[2].trim(), model = p[3].trim();
-          var serial = p[4].trim(), sizeStr = p[5].trim();
-          var iface  = p[1].trim();
-          if (!devId || devId === 'DeviceID') return;
-          var sizeN = parseInt(sizeStr, 10) || 0;
-          var label = model || devId;
-          if (serial && serial !== 'SerialNumber' && serial.length > 2)
-            label = model + ' (' + serial.slice(-8) + ')';
-          drives.push({ path:devId, label:label, model:model, serial:serial,
-            interface:(iface !== 'InterfaceType' ? iface : ''),
-            totalSize:sizeN, sectorSize:512, fs:'NTFS' });
-        });
-        resolve(drives.length > 0 ? drives : getMockDrives());
-      }
-    );
-  });
-}
-
-function getMockDrives() {
+/** Retourne { cmd, pre:[...], script:bool } : exécutable gelé (PyInstaller) ou interpréteur Python. */
+function getEngine() {
+  if (_engine) return _engine;
+  const res = process.resourcesPath || '';
+  const frozen = process.platform === 'win32' ? 'lazarus-engine.exe' : 'lazarus-engine';
+  const frozenPath = path.join(res, 'engine', frozen);
+  if (res && fs.existsSync(frozenPath)) {
+    _engine = { cmd: frozenPath, pre: [], script: false, kind: 'embedded' };
+    return _engine;
+  }
+  const root = path.join(__dirname, '..', '..', '..');
+  const cands = [];
+  if (process.env.LAZARUS_PYTHON) cands.push([process.env.LAZARUS_PYTHON, []]);
   if (process.platform === 'win32') {
-    return [
-      { path:'\\\\.\\PhysicalDrive0', label:'System Disk (Drive 0)',
-        model:'Local Disk', serial:'', interface:'SATA',
-        totalSize:500107862016, sectorSize:512, fs:'NTFS' },
-      { path:'\\\\.\\PhysicalDrive1', label:'External (Drive 1)',
-        model:'External', serial:'', interface:'USB',
-        totalSize:1000204886016, sectorSize:512, fs:'NTFS' },
-    ];
+    cands.push([path.join(root, '.venv312', 'Scripts', 'python.exe'), []]);
+    cands.push([path.join(root, '.venv', 'Scripts', 'python.exe'), []]);
+    cands.push(['python', []], ['py', ['-3']], ['python3', []]);
+  } else {
+    cands.push([path.join(root, '.venv312', 'bin', 'python'), []]);
+    cands.push([path.join(root, '.venv', 'bin', 'python'), []]);
+    cands.push(['python3', []], ['python', []]);
   }
-  return [{ path:'/dev/sda', label:'sda - Local Disk', model:'sda',
-    serial:'', interface:'SATA', totalSize:500107862016, sectorSize:512, fs:'EXT4' }];
+  for (const [cmd, pre] of cands) {
+    if (path.isAbsolute(cmd) && !fs.existsSync(cmd)) continue;
+    if (pythonWorks(cmd, pre)) {
+      _engine = { cmd, pre, script: true, kind: 'python' };
+      return _engine;
+    }
+  }
+  throw new Error("Python 3.8+ est introuvable. Installez Python (python.org) ou définissez LAZARUS_PYTHON, puis relancez Lazarus Core.");
 }
 
-// ─── Python helpers ───────────────────────────────────────────────────────────
-function getPythonExec() {
-  const cands = process.platform === 'win32'
-    ? [
-        path.join(__dirname, '../../../.venv312/Scripts/python.exe'),
-        path.join(__dirname, '../../../.venv/Scripts/python.exe'),
-        'python',
-      ]
-    : [
-        path.join(__dirname, '../../../.venv312/bin/python'),
-        path.join(__dirname, '../../../.venv/bin/python'),
-        'python3',
-      ];
-  return cands.find((p) => p === 'python' || p === 'python3' || fss.existsSync(p)) || (process.platform === 'win32' ? 'python' : 'python3');
+function engineArgs(command, args) {
+  const eng = getEngine();
+  const base = eng.script ? [...eng.pre, path.join(getIpcDir(), 'scan_backend.py')] : [];
+  return { cmd: eng.cmd, args: [...base, command, ...(args || [])] };
 }
 
-// runPythonJson with 30s watchdog timeout
-function runPythonJson(cmd, args, timeoutMs) {
-  timeoutMs = timeoutMs || 30000;
-  return new Promise((resolve, reject) => {
-    const py     = getPythonExec();
-    const script = path.join(getIpcDir(), 'scan_backend.py');
-    const child  = cp.spawn(py, [script, cmd, ...(args || [])], { cwd: getIpcDir(), windowsHide: true });
-    let out = '', err = '';
-    let timedOut = false;
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try { child.kill('SIGKILL'); } catch(_) {}
-      appendLog('WARN Python ' + cmd + ' timed out after ' + timeoutMs + 'ms');
-      reject(new Error('Python backend timeout: ' + cmd));
-    }, timeoutMs);
-
-    child.stdout.on('data', (d) => { out += d.toString(); });
-    child.stderr.on('data', (d) => {
-      err += d.toString();
-      appendLog('STDERR[' + cmd + '] ' + d.toString().trim());
-    });
-    child.on('error', (e) => { clearTimeout(timer); reject(e); });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (timedOut) return;
-      if (code !== 0) return reject(new Error(err || ('Python backend failed: ' + code)));
-      try { resolve(JSON.parse((out || '{}').trim())); }
-      catch (e) { reject(new Error('Invalid Python JSON: ' + out)); }
-    });
+function spawnEngine(command, args) {
+  const { cmd, args: a } = engineArgs(command, args);
+  return cp.spawn(cmd, a, {
+    cwd: getIpcDir(), windowsHide: true,
+    env: Object.assign({}, process.env, { PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }),
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
 }
 
-// ─── Drive enumeration ────────────────────────────────────────────────────────
-async function enumerateDrives() {
-  if (nativeAddon) {
-    try { return nativeAddon.enumerateDrives(); } catch(e) {}
-  }
-  if (process.platform === 'win32') return getWindowsDrives();
-  return getMockDrives();
+/** Découpe stdout en lignes JSON ; appelle onEvent(event, data) ou onResult(obj). */
+function attachJsonLines(child, onEvent, onResult, cmdName) {
+  let buf = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => {
+    buf += chunk;
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (!line || (line[0] !== '{' && line[0] !== '[')) continue;
+      try {
+        const obj = JSON.parse(line);
+        if (obj && !Array.isArray(obj) && obj.event) onEvent(obj.event, obj.data);
+        else if (onResult) onResult(obj);
+      } catch (_) { /* ligne tronquée : ignorée */ }
+    }
+  });
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (d) => { const t = String(d).trim(); if (t) appendLog('[' + cmdName + '] ' + t); });
 }
 
-var driveWatchInterval = null;
-var lastDriveMap       = {};
+/** Commande simple : exécute et retourne le dernier objet JSON (hors évènements). */
+function runEngineJson(command, args, timeoutMs, requestObj) {
+  return new Promise((resolve, reject) => {
+    let reqFile = null;
+    let argv = args || [];
+    try {
+      if (requestObj !== undefined) {
+        reqFile = path.join(os.tmpdir(), 'lazarus-req-' + process.pid + '-' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.json');
+        fs.writeFileSync(reqFile, JSON.stringify(requestObj), 'utf8');
+        argv = [...argv, '--request-file', reqFile];
+      }
+    } catch (e) { return reject(e); }
+    let child;
+    try { child = spawnEngine(command, argv); } catch (e) { return reject(e); }
+    let last = null; let err = '';
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} reject(new Error('Délai dépassé : ' + command)); }, timeoutMs || 30000);
+    attachJsonLines(child, () => {}, (o) => { last = o; }, command);
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('error', (e) => { clearTimeout(timer); cleanup(); reject(e); });
+    child.on('close', (code) => {
+      clearTimeout(timer); cleanup();
+      if (last !== null) return resolve(last);
+      reject(new Error(err.trim().split('\n').pop() || ('Le moteur a échoué (code ' + code + ')')));
+    });
+    function cleanup() { if (reqFile) { try { fs.unlinkSync(reqFile); } catch (_) {} } }
+  });
+}
 
-function buildDriveMap(drives) {
-  var m = {};
-  drives.forEach(function(d) { m[d.path] = d; });
+// ─── Opération active ────────────────────────────────────────────────────────
+let current = null; // { kind, child, sender, killTimer }
+
+function requestStop() {
+  if (!current) return false;
+  const c = current;
+  try { c.child.stdin.write('stop\n'); } catch (_) {}
+  if (!c.killTimer) {
+    c.killTimer = setTimeout(() => { try { c.child.kill('SIGKILL'); } catch (_) {} }, 15000);
+  }
+  return true;
+}
+
+// ─── Sessions ────────────────────────────────────────────────────────────────
+function sessionsDir() {
+  const d = path.join(userDataDir(), 'sessions');
+  fs.mkdirSync(d, { recursive: true });
+  return d;
+}
+let activeSessionId = null;   // session dont les enregistrements complets servent à la récupération
+function sessionPathOf(id) {
+  const safe = String(id || activeSessionId || '').replace(/[^0-9A-Za-z\-_]/g, '');
+  return path.join(sessionsDir(), safe + '.jsonl');
+}
+/** Allège un enregistrement pour l'interface : les extents restent dans le fichier de session. */
+function slim(f) {
+  const o = Object.assign({}, f);
+  delete o.extents; delete o.resident_b64;
+  return o;
+}
+function writeMeta(id, patch) {
+  const p = path.join(sessionsDir(), id + '.meta.json');
+  let m = {};
+  try { m = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (_) {}
+  m = Object.assign(m, patch, { id });
+  try { fs.writeFileSync(p, JSON.stringify(m, null, 2), 'utf8'); } catch (_) {}
   return m;
 }
+function markStaleSessions() {
+  try {
+    for (const f of fs.readdirSync(sessionsDir())) {
+      if (!f.endsWith('.meta.json')) continue;
+      const p = path.join(sessionsDir(), f);
+      const m = JSON.parse(fs.readFileSync(p, 'utf8'));
+      if (m.status === 'running') { m.status = 'interrupted'; fs.writeFileSync(p, JSON.stringify(m, null, 2)); }
+    }
+  } catch (_) {}
+}
 
+// ─── Surveillance des disques ────────────────────────────────────────────────
+let driveCache = { t: 0, data: null };
+async function enumerateDrives(force) {
+  if (!force && driveCache.data && Date.now() - driveCache.t < 4000) return driveCache.data;
+  const data = await runEngineJson('enumerate', [], 60000);
+  driveCache = { t: Date.now(), data: Array.isArray(data) ? data : [] };
+  return driveCache.data;
+}
+
+let driveWatchTimer = null;
+let lastDriveMap = null;
+let lastLetters = '';
+/** Lettres de lecteurs présentes (test instantané, sans lancer PowerShell). */
+function presentLetters() {
+  if (process.platform !== 'win32') return 'x';
+  let out = '';
+  for (const l of 'CDEFGHIJKLMNOPQRSTUVWXYZ') { try { if (fs.existsSync(l + ':\\')) out += l; } catch (_) {} }
+  return out;
+}
 function setupDriveWatcher(mainWindow) {
-  if (driveWatchInterval) clearInterval(driveWatchInterval);
-  enumerateDrives().then(function(drives) {
-    lastDriveMap = buildDriveMap(drives);
-    if (mainWindow && !mainWindow.isDestroyed())
-      mainWindow.webContents.send('scan:drives-updated', drives);
-  }).catch(function() {});
-  driveWatchInterval = setInterval(async function() {
-    try {
-      var drives  = await enumerateDrives();
-      var newMap  = buildDriveMap(drives);
-      var connected = [], disconnected = [];
-      Object.keys(newMap).forEach(function(p) { if (!lastDriveMap[p]) connected.push(newMap[p]); });
-      Object.keys(lastDriveMap).forEach(function(p) { if (!newMap[p]) disconnected.push(lastDriveMap[p]); });
-      if (connected.length > 0 || disconnected.length > 0) {
-        lastDriveMap = newMap;
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('scan:drives-updated', drives);
-          connected.forEach(function(d) { mainWindow.webContents.send('scan:drive-connected', d); });
-          disconnected.forEach(function(d) { mainWindow.webContents.send('scan:drive-disconnected', d); });
-        }
+  if (driveWatchTimer) clearInterval(driveWatchTimer);
+  const push = (drives) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('scan:drives-updated', drives); };
+  const refresh = async () => {
+    const drives = await enumerateDrives(true);
+    const map = new Map(drives.map((x) => [x.path, x]));
+    if (lastDriveMap) {
+      const added = drives.filter((d) => !lastDriveMap.has(d.path));
+      const removed = [...lastDriveMap.values()].filter((d) => !map.has(d.path));
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        added.forEach((d) => mainWindow.webContents.send('scan:drive-connected', d));
+        removed.forEach((d) => mainWindow.webContents.send('scan:drive-disconnected', d));
       }
-    } catch(e) {}
-  }, 800);
+    }
+    lastDriveMap = map;
+    push(drives);
+  };
+  lastLetters = presentLetters();
+  refresh().catch((e) => appendLog('WARN énumération initiale: ' + e.message));
+  let ticks = 0;
+  driveWatchTimer = setInterval(async () => {
+    if (current) return;                       // aucune interférence pendant une opération disque
+    ticks++;
+    const letters = presentLetters();
+    // changement de lecteurs détecté immédiatement ; sinon vérification complète toutes les 2 minutes
+    if (letters !== lastLetters || ticks % 24 === 0) {
+      lastLetters = letters;
+      try { await refresh(); } catch (_) {}
+    }
+  }, 5000);
 }
 
-// ─── IPC handlers ─────────────────────────────────────────────────────────────
+// ─── IPC ─────────────────────────────────────────────────────────────────────
 function setupScanIPC(ipcMain) {
+  markStaleSessions();
 
-  ipcMain.handle('scan:enumerate-drives', async function() {
-    return enumerateDrives();
+  // Réponse immédiate (API Win32, ~0,5 s) puis liste complète (modèles, partitions, santé) poussée en arrière-plan.
+  let fullEnumRunning = false;
+  ipcMain.handle('scan:enumerate-drives', async (event, force) => {
+    if (!force && driveCache.data && Date.now() - driveCache.t < 4000) return driveCache.data;
+    let fast = [];
+    try { fast = await runEngineJson('enumerate-fast', [], 20000); } catch (e) { appendLog('WARN énumération rapide: ' + e.message); }
+    if (!fullEnumRunning) {
+      fullEnumRunning = true;
+      enumerateDrives(true).then((d) => {
+        if (!event.sender.isDestroyed()) event.sender.send('scan:drives-updated', d);
+      }).catch((e) => appendLog('WARN énumération complète: ' + e.message)).finally(() => { fullEnumRunning = false; });
+    }
+    if (Array.isArray(fast) && fast.length) return fast;
+    try { return await enumerateDrives(!!force); }
+    catch (e) { appendLog('ERROR énumération: ' + e.message); return { error: e.message, drives: [] }; }
   });
 
-  // Stop an active Python scan
-  ipcMain.handle('scan:stop', function() {
-    if (activeScanProcess) {
-      try {
-        activeScanProcess.kill('SIGKILL');
-        appendLog('INFO scan:stop — process killed by user');
-      } catch(_) {}
-      activeScanProcess = null;
-    }
-    return { stopped: true };
-  });
-
-  ipcMain.handle('scan:start', async function(event, options) {
-    if (!nativeAddon) {
-      try {
-        const py     = getPythonExec();
-        const script = path.join(getIpcDir(), 'scan_backend.py');
-        const devicePath = (options && options.devicePath) ? options.devicePath : '\\\\.\\PhysicalDrive0';
-        const outputDir  = (options && options.outputDir)  ? options.outputDir  : require('path').join(require('os').homedir(), 'LazarusRecovered');
-        const scanArgs = [script, 'scan', '--device', devicePath, '--output-dir', outputDir];
-        if (options && options.deepScan) scanArgs.push('--deep-scan');
-        const child  = cp.spawn(py, scanArgs, { cwd: getIpcDir(), windowsHide: true });
-        activeScanProcess = child;
-        const sender = event.sender;
-        let buf = '';
-        let fileCount = 0;
-
-        const SCAN_TIMEOUT = 5 * 60 * 1000; // 5 min watchdog
-        const watchdog = setTimeout(() => {
-          appendLog('WARN scan timed out after 5 min — killing Python process');
-          try { child.kill('SIGKILL'); } catch(_) {}
-          if (!sender.isDestroyed()) sender.send('scan:done', { filesFound: fileCount, timedOut: true });
-        }, SCAN_TIMEOUT);
-
-        appendLog('INFO scan:start — Python engine launched (pid=' + (child.pid || '?') + ')');
-
-        child.stdout.on('data', function(chunk) {
-          buf += chunk.toString();
-          var lines = buf.split('\n');
-          buf = lines.pop();
-          lines.forEach(function(line) {
-            line = line.trim(); if (!line) return;
-            try {
-              var msg = JSON.parse(line);
-              if (!sender.isDestroyed()) {
-                if (msg.event === 'file-found') { fileCount++; sender.send('scan:file-found', msg.data); }
-                if (msg.event === 'progress')   sender.send('scan:progress', msg.data);
-                if (msg.event === 'done') {
-                  clearTimeout(watchdog);
-                  activeScanProcess = null;
-                  appendLog('INFO scan:done — files found: ' + (msg.data && msg.data.filesFound != null ? msg.data.filesFound : fileCount));
-                  sender.send('scan:done', msg.data);
-                }
-              }
-            } catch(_e) {}
-          });
-        });
-        child.stderr.on('data', function(d) {
-          const txt = d.toString().trim();
-          console.warn('Python scan:', txt);
-          appendLog('STDERR[scan] ' + txt);
-        });
-        child.on('close', function(code) {
-          clearTimeout(watchdog);
-          activeScanProcess = null;
-          if (code !== 0) {
-            appendLog('WARN Python scan exited with code ' + code);
-            if (!sender.isDestroyed()) sender.send('scan:done', { filesFound: fileCount, error: 'Python exited: ' + code });
-          }
-        });
-        child.on('error', function(e) {
-          clearTimeout(watchdog);
-          activeScanProcess = null;
-          appendLog('ERROR scan process error: ' + e.message);
-          if (!sender.isDestroyed()) sender.send('scan:done', { filesFound: fileCount, error: e.message });
-        });
-        return { started: true };
-      } catch(e) {
-        appendLog('ERROR scan:start failed — ' + e.message);
-        if (!event.sender.isDestroyed()) event.sender.send('scan:done', { filesFound: 0, error: 'No scan engine available: ' + e.message });
-        return { started: false, error: e.message };
-      }
-    }
-    // Native addon path
-    var sender    = event.sender;
-    var outputDir = options.outputDir || path.join(os.homedir(), 'LazarusRecovered');
-    appendLog('INFO scan:start — native addon (device=' + (options.devicePath || '?') + ')');
-    nativeAddon.startScan(
-      { devicePath:options.devicePath, outputDir:outputDir,
-        scanNTFS:options.scanNTFS!==false, scanEXT4:options.scanEXT4!==false,
-        scanAPFS:options.scanAPFS!==false, enableCarving:options.enableCarving!==false,
-        deepScan:options.deepScan===true, threads:options.threads||0 },
-      function(file) {
-        if (!sender.isDestroyed()) {
-          file.health = computeHealth(file, file.id);
-          sender.send('scan:file-found', file);
-        }
-      },
-      function(progress) {
-        if (!sender.isDestroyed()) {
-          sender.send('scan:progress', progress);
-          if (progress.finished) {
-            appendLog('INFO scan:done (native) — files found: ' + (progress.filesFound || 0));
-            sender.send('scan:done', { filesFound: progress.filesFound });
-          }
-        }
-      }
-    );
-    return { started: true };
-  });
-
-  ipcMain.handle('scan:recover', async function(_, devicePath, file, outputDir) {
-    if (!nativeAddon) {
-      try {
-        return await runPythonJson('recover', ['--file-json', JSON.stringify(file || {}), '--output-dir', outputDir || '']);
-      } catch(e) {
-        var dest = path.join(outputDir || os.homedir(), file.name || 'recovered_file');
-        return { success:true, outputPath:dest, health:file.health };
-      }
-    }
+  ipcMain.handle('app:diag', async () => {
+    const out = { engine: null, admin: false, python: null, error: null, logPath: getLogPath() };
     try {
-      var ok = nativeAddon.recoverFile(devicePath, file, outputDir);
-      return { success:ok, outputPath:path.join(outputDir, file.name), health:file.health };
-    } catch(e) { return { success:false, message:e.message }; }
+      const eng = getEngine();
+      out.engine = eng.kind;
+      const d = await runEngineJson('diag', [], 20000);
+      Object.assign(out, d, { python: eng.cmd, python_version: d.python, engine: eng.kind });
+    } catch (e) { out.error = e.message; }
+    return out;
   });
 
-  ipcMain.handle('scan:analyze-health', async function(_, file) {
-    if (!nativeAddon) {
-      try { return await runPythonJson('analyze', ['--file-json', JSON.stringify(file || {})]); }
-      catch(e) { return computeHealth(file, file.id); }
+  ipcMain.handle('app:relaunch-admin', async () => {
+    if (process.platform !== 'win32') return { success: false, message: 'Relancez avec sudo.' };
+    try {
+      const { app } = require('electron');
+      const exe = process.execPath;
+      const args = app.isPackaged ? [] : [app.getAppPath()];
+      const argList = args.map((a) => "'" + a.replace(/'/g, "''") + "'").join(',');
+      const ps = "Start-Process -FilePath '" + exe.replace(/'/g, "''") + "' " + (argList ? '-ArgumentList ' + argList + ' ' : '') + '-Verb RunAs';
+      cp.spawn('powershell', ['-NoProfile', '-Command', ps], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
+      setTimeout(() => app.quit(), 600);
+      return { success: true };
+    } catch (e) { return { success: false, message: e.message }; }
+  });
+
+  // ---- Analyse ----
+  ipcMain.handle('scan:start', async (event, options) => {
+    if (current) return { started: false, error: 'Une opération est déjà en cours.' };
+    options = options || {};
+    const sender = event.sender;
+    const resuming = options.resumeSessionId ? String(options.resumeSessionId).replace(/[^0-9A-Za-z\-_]/g, '') : '';
+    const id = resuming || new Date().toISOString().replace(/[:.]/g, '-');
+    const sessionPath = path.join(sessionsDir(), id + '.jsonl');
+    const req = Object.assign({}, options, { device: options.devicePath, sessionPath });
+    delete req.devicePath;
+    let child;
+    let reqFile;
+    try {
+      reqFile = path.join(os.tmpdir(), 'lazarus-scan-' + process.pid + '-' + Date.now() + '.json');
+      fs.writeFileSync(reqFile, JSON.stringify(req), 'utf8');
+      child = spawnEngine('scan', ['--request-file', reqFile]);
+    } catch (e) {
+      appendLog('ERROR scan:start ' + e.message);
+      sender.send('scan:done', { filesFound: 0, error: e.message, engineMissing: true });
+      return { started: false, error: e.message };
     }
-    return computeHealth(file, file.id);
-  });
+    current = { kind: 'scan', child, sender, killTimer: null };
+    activeSessionId = id;
+    writeMeta(id, { status: 'running', device: options.devicePath, label: options.deviceLabel || options.devicePath,
+      ...(resuming ? {} : { started: new Date().toISOString() }), options: { deepScan: !!options.deepScan, enableCarving: options.enableCarving !== false,
+        includeExisting: !!options.includeExisting }, filesFound: 0 });
+    appendLog('INFO scan démarré: ' + options.devicePath + ' (session ' + id + ')');
 
-  ipcMain.handle('scan:preview-file', async function(_, filePath, maxBytes) {
-    if (!filePath) return { success:false, message:'Missing file path' };
-    if (!nativeAddon) {
-      try {
-        return await runPythonJson('preview', ['--file', String(filePath), '--max-bytes', String(maxBytes || 65536)]);
-      } catch(e) {
-        return { success:false, message:e.message };
+    let batch = [];
+    let total = 0;
+    let doneSent = false;
+    let lastOffset = 0;
+    let lastMetaWrite = 0;
+    const flush = () => {
+      if (batch.length && !sender.isDestroyed()) sender.send('scan:files-batch', batch);
+      batch = [];
+    };
+    const flushTimer = setInterval(flush, 150);
+    const finish = (data) => {
+      if (doneSent) return;
+      doneSent = true;
+      clearInterval(flushTimer); flush();
+      clearTimeout(current && current.killTimer);
+      current = null;
+      try { fs.unlinkSync(reqFile); } catch (_) {}
+      writeMeta(id, { status: data.error ? 'error' : (data.stopped ? 'stopped' : 'complete'), ended: new Date().toISOString(),
+        filesFound: data.filesFound != null ? data.filesFound : total, engines: data.engines || [], error: data.error || null,
+        lastOffset: (data.stopped || data.error) ? lastOffset : 0 });
+      if (!sender.isDestroyed()) sender.send('scan:done', Object.assign({ sessionId: id }, data));
+    };
+    attachJsonLines(child, (ev, data) => {
+      if (ev === 'file-found') { total++; batch.push(slim(data)); if (batch.length >= 500) flush(); }
+      else if (ev === 'progress') {
+        if (data && data.engine === 'carve' && data.offset) {
+          lastOffset = data.offset;
+          if (Date.now() - lastMetaWrite > 8000) { lastMetaWrite = Date.now(); writeMeta(id, { lastOffset }); }
+        }
+        if (!sender.isDestroyed()) sender.send('scan:progress', data);
       }
-    }
+      else if (ev === 'layout') { if (!sender.isDestroyed()) sender.send('scan:layout', data); }
+      else if (ev === 'warning') { if (!sender.isDestroyed()) sender.send('scan:warning', data); }
+      else if (ev === 'done') { finish(data); }
+    }, null, 'scan');
+    child.on('error', (e) => { appendLog('ERROR moteur: ' + e.message); finish({ filesFound: total, error: e.message, engineMissing: true }); });
+    child.on('close', (code) => {
+      if (!doneSent) {
+        appendLog('WARN le moteur s\'est arrêté (code ' + code + ') sans message de fin');
+        finish({ filesFound: total, error: code === 0 ? null : 'Le moteur s\'est arrêté de façon inattendue (code ' + code + '). Consultez le journal.' });
+      }
+    });
+    return { started: true, sessionId: id };
+  });
+
+  ipcMain.handle('scan:stop', () => ({ stopped: requestStop() }));
+
+  // ---- Récupération par lots ----
+  ipcMain.handle('scan:recover-batch', async (event, opts) => {
+    if (current) return { success: false, error: 'Une opération est déjà en cours.' };
+    opts = opts || {};
+    const sender = event.sender;
+    let reqFile;
+    let child;
     try {
-      var sz = Math.min(Math.max(maxBytes || 65536, 1024), 524288);
-      var b  = fss.readFileSync(filePath);
-      var h  = b.subarray(0, sz).toString('base64');
-      return { success:true, kind:'binary', name:path.basename(filePath), size:b.length, head_b64:h, bytes:Math.min(sz, b.length) };
-    } catch(e) {
-      return { success:false, message:e.message };
-    }
-  });
-
-  ipcMain.handle('scan:repair-file', async function(event, args) {
-    var file = args.file, outputDir = args.outputDir, mode = args.mode;
-    if (!nativeAddon) {
-      try { return await runPythonJson('repair', ['--args-json', JSON.stringify(args || {})]); }
-      catch(e) { console.warn('Python repair failed:', e.message); }
-    }
-    var destDir  = outputDir || path.join(os.homedir(), 'LazarusRecovered');
-    var destPath = path.join(destDir, 'repaired_' + (file.name || 'file'));
-    if (!fss.existsSync(destDir)) {
-      try { fss.mkdirSync(destDir, { recursive:true }); } catch(e){}
-    }
-    var recoveryOk = false;
-    if (nativeAddon && file.status !== 0) {
-      try {
-        recoveryOk = nativeAddon.recoverFile(
-          file.devicePath || '\\\\.\\PhysicalDrive0', file, destDir);
-      } catch(e){}
-    } else { recoveryOk = true; }
-    // ── Image repair via AI server (proper form-data, dynamic port) ────────
-    if (file.type === 1 && (file.path || destPath)) {
-      try {
-        var _aiProc = require('../ai_process');
-        var FormData = require('form-data');
-        var axios    = require('axios');
-        var srcPath  = (file.path && fss.existsSync(file.path)) ? file.path : destPath;
-        if (fss.existsSync(srcPath)) {
-          var form = new FormData();
-          form.append('file', fss.createReadStream(srcPath));
-          var useAI = mode !== 'minor' ? 'true' : 'false';
-          var resp = await axios.post(
-            'http://127.0.0.1:' + _aiProc.AI_PORT + '/repair/image?enhance=true&use_ai=' + useAI,
-            form,
-            { headers: Object.assign({}, form.getHeaders(), { 'x-api-key': _aiProc.AI_SECRET }),
-              timeout: 120000 });
-          if (resp.data && resp.data.success) {
-            return { success:true, outputPath:destPath, image_b64:resp.data.image_b64,
-                     confidence:resp.data.confidence, health:file.health, repaired:true };
-          }
-        }
-      } catch(e) { appendLog('WARN AI image repair: ' + e.message); }
-    }
-    // ── Audio repair via AI server ────────────────────────────────────────
-    var ext = (file.extension || file.ext || '').toLowerCase();
-    if ((ext === 'mp3' || ext === 'wav') && (file.path || destPath)) {
-      try {
-        var _aiProc = require('../ai_process');
-        var FormData = require('form-data');
-        var axios    = require('axios');
-        var srcPath  = (file.path && fss.existsSync(file.path)) ? file.path : destPath;
-        if (fss.existsSync(srcPath)) {
-          var form = new FormData();
-          form.append('file', fss.createReadStream(srcPath));
-          var resp = await axios.post(
-            'http://127.0.0.1:' + _aiProc.AI_PORT + '/repair/audio',
-            form,
-            { headers: Object.assign({}, form.getHeaders(), { 'x-api-key': _aiProc.AI_SECRET }),
-              timeout: 60000 });
-          if (resp.data && resp.data.success) {
-            return { success:true, outputPath:destPath, file_b64:resp.data.file_b64,
-                     health:file.health, repaired:true };
-          }
-        }
-      } catch(e) { appendLog('WARN AI audio repair: ' + e.message); }
-    }
-    // ── Document repair via AI server ─────────────────────────────────────
-    var docExts = ['docx','xlsx','pptx','odt','ods','pdf'];
-    if (docExts.indexOf(ext) >= 0 && (file.path || destPath)) {
-      try {
-        var _aiProc = require('../ai_process');
-        var FormData = require('form-data');
-        var axios    = require('axios');
-        var srcPath  = (file.path && fss.existsSync(file.path)) ? file.path : destPath;
-        if (fss.existsSync(srcPath)) {
-          var form = new FormData();
-          form.append('file', fss.createReadStream(srcPath));
-          var resp = await axios.post(
-            'http://127.0.0.1:' + _aiProc.AI_PORT + '/repair/document',
-            form,
-            { headers: Object.assign({}, form.getHeaders(), { 'x-api-key': _aiProc.AI_SECRET }),
-              timeout: 60000 });
-          if (resp.data && resp.data.success) {
-            return { success:true, outputPath:destPath, file_b64:resp.data.file_b64,
-                     health:file.health, repaired:true };
-          }
-        }
-      } catch(e) { appendLog('WARN AI document repair: ' + e.message); }
-    }
-    return { success:recoveryOk, outputPath:destPath, health:file.health || {}, repaired:recoveryOk };
-  });
-
-  // ─── VSS Shadow Copy list ─────────────────────────────────────────────────
-  ipcMain.handle('scan:vss-list', async function() {
-    try {
-      return await runPythonJson('vss-shadows', [], 10000);
-    } catch(e) {
-      return [];
-    }
-  });
-
-  // ─── Disk Imager ──────────────────────────────────────────────────────────
-  ipcMain.handle('scan:image-disk', async function(event, opts) {
-    if (!opts || !opts.device || !opts.outputImage)
-      return { success: false, message: 'Missing device or outputImage' };
-    return new Promise(function(resolve) {
-      const py     = getPythonExec();
-      const script = path.join(getIpcDir(), 'scan_backend.py');
-      const child  = cp.spawn(py, [
-        script, 'image-disk',
-        '--device', opts.device,
-        '--output-image', opts.outputImage,
-        '--sector-size', String(opts.sectorSize || 512)
-      ], { cwd: getIpcDir(), windowsHide: true });
-      activeScanProcess = child;
-      const sender = event.sender;
-      let out = '';
-      child.stdout.on('data', function(d) { out += d.toString(); });
-      child.stderr.on('data', function(d) { appendLog('STDERR[image-disk] ' + d.toString().trim()); });
-      child.on('close', function() {
-        activeScanProcess = null;
-        const lines = out.trim().split('\n');
-        try { resolve(JSON.parse(lines[lines.length - 1])); }
-        catch(_) { resolve({ success: false, message: 'Imaging process ended' }); }
+      reqFile = path.join(os.tmpdir(), 'lazarus-rec-' + process.pid + '-' + Date.now() + '.json');
+      fs.writeFileSync(reqFile, JSON.stringify({
+        sessionPath: sessionPathOf(opts.sessionId), ids: opts.ids || [],
+        destination: opts.destination, structure: opts.structure || 'tree',
+        verify: opts.verify !== false, device: opts.device, allowSameDisk: !!opts.allowSameDisk,
+      }), 'utf8');
+      child = spawnEngine('recover', ['--request-file', reqFile]);
+    } catch (e) { return { success: false, error: e.message }; }
+    current = { kind: 'recover', child, sender, killTimer: null };
+    return await new Promise((resolve) => {
+      let result = null;
+      attachJsonLines(child, (ev, data) => {
+        if (sender.isDestroyed()) return;
+        if (ev === 'recover-progress') sender.send('recover:progress', data);
+        else if (ev === 'recover-file-done') sender.send('recover:file-done', data);
+      }, (o) => { result = o; }, 'recover');
+      child.on('error', (e) => { cleanup(); resolve({ success: false, error: e.message }); });
+      child.on('close', (code) => {
+        cleanup();
+        resolve(result || { success: false, error: 'La récupération s\'est interrompue (code ' + code + ')' });
       });
-      child.on('error', function(e) { activeScanProcess = null; resolve({ success: false, message: e.message }); });
+      function cleanup() { clearTimeout(current && current.killTimer); current = null; try { fs.unlinkSync(reqFile); } catch (_) {} }
     });
   });
 
-  // --- Forensic Report Generator ---
-  ipcMain.handle('scan:generate-report', async function(_, opts) {
-    if (!opts || !opts.files || !opts.outputDir)
-      return { success: false, message: 'Missing files or outputDir' };
-    const py     = getPythonExec();
-    const script = path.join(getIpcDir(), 'scan_backend.py');
-    const reportJson = JSON.stringify({
-      files:       opts.files,
-      device:      opts.device      || 'unknown',
-      scanStarted: opts.scanStarted || '',
-      scanEnded:   opts.scanEnded   || '',
-    });
-    return new Promise(function(resolve) {
-      const child = cp.spawn(py, [
-        script, 'report',
-        '--report-json', reportJson,
-        '--output-dir',  opts.outputDir,
-      ], { cwd: getIpcDir(), windowsHide: true });
-      let out = '', err2 = '';
-      child.stdout.on('data', function(d) { out += d.toString(); });
-      child.stderr.on('data', function(d) { err2 += d.toString(); appendLog('STDERR[report] ' + d.toString().trim()); });
-      child.on('close', function(code) {
-        if (code !== 0 && !out.trim()) { resolve({ success: false, message: err2 || 'Report failed' }); return; }
-        const lines = out.trim().split('\\n');
-        try { resolve(JSON.parse(lines[lines.length - 1])); }
-        catch(_) { resolve({ success: false, message: 'Invalid output' }); }
-      });
-      child.on('error', function(e) { resolve({ success: false, message: e.message }); });
+  // Compatibilité : récupération d'un seul fichier
+  ipcMain.handle('scan:recover', async (event, devicePath, file, outputDir) => {
+    if (!file) return { success: false, message: 'Aucun fichier' };
+    return await runSingleRecover(event, devicePath, file, outputDir);
+  });
+
+  async function runSingleRecover(event, devicePath, file, outputDir) {
+    if (current) return { success: false, message: 'Une opération est déjà en cours.' };
+    try {
+      const res = await runEngineJson('recover', [], 6 * 3600 * 1000, {
+        sessionPath: sessionPathOf(), ids: [file.id], destination: outputDir || path.join(os.homedir(), 'LazarusRecovered'),
+        structure: 'flat', verify: true, device: devicePath || file.device || undefined });
+      const first = res.results && res.results[0];
+      if (res.blocked) return { success: false, blocked: true, message: res.error };
+      return { success: !!(first && first.success), outputPath: first && first.outputPath, message: (first && first.error) || res.error,
+        md5: first && first.md5, sha256: first && first.sha256, integrity: first && first.integrity, health: file.health };
+    } catch (e) { return { success: false, message: e.message }; }
+  }
+
+  ipcMain.handle('scan:check-dest', async (_e, device, destination) => {
+    try { return await runEngineJson('check-dest', [], 40000, { device, destination }); }
+    catch (e) { return { safe: true, error: e.message }; }
+  });
+
+  // ---- Aperçu ----
+  ipcMain.handle('scan:preview-record', async (_e, record, maxBytes) => {
+    try {
+      return await runEngineJson('preview-record', [], 90000, { sessionPath: sessionPathOf(), id: record && record.id,
+        maxBytes: maxBytes || 262144, device: (record && record.device) || undefined });
+    }
+    catch (e) { return { success: false, message: e.message }; }
+  });
+  ipcMain.handle('scan:thumbs', async (_e, ids) => {
+    try { return await runEngineJson('thumbs', [], 120000, { sessionPath: sessionPathOf(), ids: (ids || []).slice(0, 48) }); }
+    catch (e) { return { success: false, thumbs: [], message: e.message }; }
+  });
+  ipcMain.handle('scan:preview-file', async (_e, filePath, maxBytes) => {
+    if (!filePath) return { success: false, message: 'Chemin manquant' };
+    try { return await runEngineJson('preview', ['--file', String(filePath), '--max-bytes', String(maxBytes || 65536)], 30000); }
+    catch (e) { return { success: false, message: e.message }; }
+  });
+
+  ipcMain.handle('scan:analyze-health', async (_e, file) => {
+    try { return await runEngineJson('analyze', ['--file-json', JSON.stringify(file || {})], 15000); }
+    catch (e) { return (file && file.health) || {}; }
+  });
+
+  // ---- Réparation ----
+  ipcMain.handle('scan:repair-file', async (event, args) => {
+    args = args || {};
+    const file = args.file || {};
+    const outDir = args.outputDir || path.join(os.homedir(), 'LazarusRecovered');
+    try {
+      let src = file.outputPath && fs.existsSync(file.outputPath) ? file.outputPath : null;
+      if (!src) {
+        const rec = await runSingleRecover(event, file.device, file, outDir);
+        if (!rec.success) return { success: false, message: rec.message || 'Récupération impossible avant réparation' };
+        src = rec.outputPath;
+      }
+      const r = await runEngineJson('repair', [], 600000, { file, path: src });
+      let out = Object.assign({ health: file.health }, r);
+      // Réparation image par IA (optionnelle) pour les dégradations importantes
+      if (file.type === 1 && args.mode && args.mode !== 'minor') {
+        try {
+          const ai = require('../ai_process');
+          const FormData = require('form-data'); const axios = require('axios');
+          const form = new FormData(); form.append('file', fs.createReadStream(r.outputPath || src));
+          const resp = await axios.post('http://127.0.0.1:' + ai.AI_PORT + '/repair/image?enhance=true&use_ai=true', form,
+            { headers: Object.assign({}, form.getHeaders(), { 'x-api-key': ai.AI_SECRET }), timeout: 120000 });
+          if (resp.data && resp.data.success) {
+            out.image_b64 = resp.data.image_b64; out.confidence = resp.data.confidence; out.success = true; out.repaired = true;
+          }
+        } catch (e) { appendLog('WARN réparation IA: ' + e.message); }
+      }
+      if (out.success && out.repaired) {
+        const h = Object.assign({}, file.health || {});
+        h.score = Math.min(100, (h.score || 50) + 25); h.repairMode = Math.max(0, (h.repairMode || 0) - 1);
+        h.label = 'Réparé'; h.headerOk = true; out.health = h;
+      }
+      return out;
+    } catch (e) { return { success: false, message: e.message }; }
+  });
+
+  // ---- Clichés instantanés, imagerie ----
+  ipcMain.handle('scan:vss-list', async () => {
+    try { return await runEngineJson('vss-list', [], 40000); } catch (_) { return []; }
+  });
+
+  ipcMain.handle('scan:image-disk', async (event, opts) => {
+    if (!opts || !opts.device || !opts.outputImage) return { success: false, message: 'Source ou destination manquante' };
+    if (current) return { success: false, message: 'Une opération est déjà en cours.' };
+    const sender = event.sender;
+    let child; let reqFile;
+    try {
+      reqFile = path.join(os.tmpdir(), 'lazarus-img-' + process.pid + '-' + Date.now() + '.json');
+      fs.writeFileSync(reqFile, JSON.stringify({ device: opts.device, outputImage: opts.outputImage, start: opts.start || 0, length: opts.length || null }));
+      child = spawnEngine('image-disk', ['--request-file', reqFile]);
+    } catch (e) { return { success: false, message: e.message }; }
+    current = { kind: 'image', child, sender, killTimer: null };
+    return await new Promise((resolve) => {
+      let result = null;
+      attachJsonLines(child, (ev, data) => { if (ev === 'progress' && !sender.isDestroyed()) sender.send('image:progress', data); },
+        (o) => { result = o; }, 'image');
+      const end = (r) => { clearTimeout(current && current.killTimer); current = null; try { fs.unlinkSync(reqFile); } catch (_) {} resolve(r); };
+      child.on('error', (e) => end({ success: false, message: e.message }));
+      child.on('close', (code) => end(result || { success: false, message: 'Imagerie interrompue (code ' + code + ')' }));
     });
   });
 
+  // ---- Rapport, auto-test ----
+  ipcMain.handle('scan:generate-report', async (_e, opts) => {
+    if (!opts || !opts.files || !opts.outputDir) return { success: false, message: 'Fichiers ou dossier manquant' };
+    try {
+      return await runEngineJson('report', [], 300000, { files: opts.files, device: opts.device || 'inconnu',
+        scanStarted: opts.scanStarted || '', scanEnded: opts.scanEnded || '', outputDir: opts.outputDir });
+    } catch (e) { return { success: false, message: e.message }; }
+  });
 
+  ipcMain.handle('scan:selftest', async (_e, volume) => {
+    try { return await runEngineJson('selftest', ['--volume', String(volume || 'C:'), '--count', '30'], 15 * 60 * 1000); }
+    catch (e) { return { success: false, error: e.message }; }
+  });
+
+
+  // ---- Outils d'investigation ------------------------------------------------------------------
+  ipcMain.handle('tools:smart', async () => { try { return await runEngineJson('smart', [], 90000); } catch (e) { return []; } });
+  ipcMain.handle('tools:hex', async (_e, device, offset, length) => {
+    try { return await runEngineJson('hex-read', [], 30000, { device, offset, length }); } catch (e) { return { success: false, message: e.message }; }
+  });
+  ipcMain.handle('tools:export-range', async (_e, device, offset, length, dest) => {
+    try { return await runEngineJson('export-range', [], 600000, { device, offset, length, dest }); } catch (e) { return { success: false, message: e.message }; }
+  });
+  ipcMain.handle('tools:raid-detect', async (_e, members, cacheMB) => {
+    try { return await runEngineJson('raid-detect', [], 30 * 60 * 1000, { members, cacheMB }); } catch (e) { return { success: false, message: e.message }; }
+  });
+  ipcMain.handle('tools:bitlocker-probe', async (_e, device, start) => {
+    try { return await runEngineJson('bitlocker-probe', [], 60000, { device, start }); } catch (e) { return { bitlocker: false, error: e.message }; }
+  });
+  ipcMain.handle('tools:partitions', async (_e, device) => {
+    try { return await runEngineJson('partitions', [], 180000, { device }); } catch (e) { return { success: false, error: e.message }; }
+  });
+
+  ipcMain.handle('tools:search-start', async (event, opts) => {
+    if (current) return { success: false, message: 'Une opération est déjà en cours.' };
+    const sender = event.sender;
+    let child; let reqFile;
+    try {
+      reqFile = path.join(os.tmpdir(), 'lazarus-search-' + process.pid + '-' + Date.now() + '.json');
+      fs.writeFileSync(reqFile, JSON.stringify(opts || {}), 'utf8');
+      child = spawnEngine('search', ['--request-file', reqFile]);
+    } catch (e) { return { success: false, message: e.message }; }
+    current = { kind: 'search', child, sender, killTimer: null };
+    return await new Promise((resolve) => {
+      let result = null; let batch = [];
+      const flush = () => { if (batch.length && !sender.isDestroyed()) sender.send('search:hits', batch); batch = []; };
+      const timer = setInterval(flush, 200);
+      attachJsonLines(child, (ev, data) => {
+        if (ev === 'hit') batch.push(data);
+        else if (ev === 'progress' && !sender.isDestroyed()) sender.send('search:progress', data);
+      }, (o) => { result = o; }, 'search');
+      const end = (r) => { clearInterval(timer); flush(); clearTimeout(current && current.killTimer); current = null; try { fs.unlinkSync(reqFile); } catch (_) {} resolve(r); };
+      child.on('error', (e) => end({ success: false, message: e.message }));
+      child.on('close', (code) => end(result || { success: false, message: 'Recherche interrompue (code ' + code + ')' }));
+    });
+  });
+  ipcMain.handle('tools:search-stop', () => ({ stopped: requestStop() }));
+
+  // ---- Sessions sauvegardées ----
+  ipcMain.handle('session:list', async () => {
+    try {
+      return fs.readdirSync(sessionsDir()).filter((f) => f.endsWith('.meta.json')).map((f) => {
+        try { return JSON.parse(fs.readFileSync(path.join(sessionsDir(), f), 'utf8')); } catch (_) { return null; }
+      }).filter(Boolean).sort((a, b) => String(b.started).localeCompare(String(a.started)));
+    } catch (_) { return []; }
+  });
+
+  ipcMain.handle('session:load', async (event, id) => {
+    const safe = String(id || '').replace(/[^0-9A-Za-z\-_]/g, '');
+    const p = path.join(sessionsDir(), safe + '.jsonl');
+    if (!safe || !fs.existsSync(p)) return { success: false, message: 'Session introuvable' };
+    const sender = event.sender;
+    activeSessionId = safe;
+    const rl = require('readline').createInterface({ input: fs.createReadStream(p, { encoding: 'utf8' }), crlfDelay: Infinity });
+    let batch = []; let n = 0;
+    for await (const line of rl) {
+      if (!line) continue;
+      try { batch.push(slim(JSON.parse(line))); n++; } catch (_) { continue; }
+      if (batch.length >= 2000) { if (!sender.isDestroyed()) sender.send('scan:files-batch', batch); batch = []; await new Promise((r) => setImmediate(r)); }
+    }
+    if (batch.length && !sender.isDestroyed()) sender.send('scan:files-batch', batch);
+    let meta = {};
+    try { meta = JSON.parse(fs.readFileSync(path.join(sessionsDir(), safe + '.meta.json'), 'utf8')); } catch (_) {}
+    return { success: true, count: n, meta };
+  });
+
+  ipcMain.handle('session:delete', async (_e, id) => {
+    const safe = String(id || '').replace(/[^0-9A-Za-z\-_]/g, '');
+    for (const ext of ['.jsonl', '.meta.json']) { try { fs.unlinkSync(path.join(sessionsDir(), safe + ext)); } catch (_) {} }
+    return true;
+  });
 }
 
-module.exports = { setupScanIPC:setupScanIPC, setupDriveWatcher:setupDriveWatcher };
+function stopEverything() {
+  if (current) { try { current.child.kill('SIGKILL'); } catch (_) {} current = null; }
+  if (driveWatchTimer) clearInterval(driveWatchTimer);
+}
 
+module.exports = { setupScanIPC, setupDriveWatcher, stopEverything, appendLog, getEngine, getIpcDir };

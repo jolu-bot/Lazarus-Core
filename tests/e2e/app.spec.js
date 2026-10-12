@@ -2,41 +2,46 @@ const { test, expect, _electron: electron } = require('@playwright/test');
 const path = require('path');
 
 let app, page;
+const consoleErrors = [];
 
 test.beforeAll(async () => {
+  const env = { ...process.env };
+  delete env.ELECTRON_RUN_AS_NODE;       // sinon Electron démarre comme un simple Node
   app = await electron.launch({
     args: [path.join(__dirname, '../../app/main/index.js')],
-    env: { ...process.env, NODE_ENV: 'test' },
+    env,
   });
   page = await app.firstWindow();
+  page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
+  page.on('pageerror', (e) => consoleErrors.push(e.message));
   await page.waitForLoadState('domcontentloaded');
+  await page.waitForTimeout(2500);
 });
 
 test.afterAll(async () => {
   await app.close();
 });
 
-test('App window opens and renders title bar', async () => {
-  const title = await app.evaluate(async ({ app }) => app.getVersion());
-  expect(title).toBeTruthy();
-  await expect(page.locator('[data-testid=titlebar]')).toBeVisible({ timeout: 10000 }).catch(() => {});
+test('la fenêtre s\'ouvre avec le pont IPC', async () => {
+  expect(await page.title()).toBe('Lazarus Core');
+  expect(await page.evaluate(() => !!window.lazarus)).toBe(true);
 });
 
-test('ScanView renders without crash', async () => {
-  await page.waitForTimeout(2000);
-  const html = await page.content();
-  expect(html).toContain('lazarus'.toLowerCase() || html.toLowerCase().includes('scan'));
+test('la vue Analyse affiche la barre de contrôle', async () => {
+  const text = await page.evaluate(() => document.body.innerText);
+  expect(text).toContain('LAZARUS CORE');
+  expect(text).toContain('Lancer l’analyse');
 });
 
-test('No console errors on load', async () => {
-  const errors = [];
-  page.on('console', msg => { if (msg.type() === 'error') errors.push(msg.text()); });
-  await page.waitForTimeout(1000);
-  const fatal = errors.filter(e => !e.includes('lazarus_core.node'));
-  expect(fatal.length).toBe(0);
+test('toutes les vues se chargent sans erreur', async () => {
+  for (let i = 1; i <= 5; i++) {
+    await page.evaluate((idx) => document.querySelectorAll('.w-16 button')[idx].click(), i);
+    await page.waitForTimeout(300);
+  }
+  expect(consoleErrors).toEqual([]);
 });
 
-test('Window title is set', async () => {
-  const title = await page.title();
-  expect(title.length).toBeGreaterThan(0);
+test('l\'énumération des disques répond', async () => {
+  const drives = await page.evaluate(() => window.lazarus.invoke('scan:enumerate-drives', true));
+  expect(Array.isArray(drives)).toBe(true);
 });

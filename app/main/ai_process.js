@@ -6,7 +6,8 @@ const app_root  = require('electron').app;
 
 let aiProcess = null;
 const AI_PORT  = process.env.LAZARUS_AI_PORT || '8765';
-const AI_SECRET = process.env.LAZARUS_AI_SECRET || 'dev_only_secret_change_in_prod';
+// Secret aléatoire par exécution (le serveur n'écoute que sur 127.0.0.1, mais aucun autre processus local ne doit pouvoir l'appeler)
+const AI_SECRET = process.env.LAZARUS_AI_SECRET || require('crypto').randomBytes(24).toString('hex');
 
 function getAIPythonPath() {
   const isPackaged = require('electron').app.isPackaged;
@@ -37,6 +38,14 @@ async function startAIServer() {
   const venvExists = require('fs').existsSync(venv312);
   const pythonBin = venvExists ? venv312 : (process.platform === 'win32' ? 'python' : 'python3');
   console.log('[AI] Using python:', venvExists ? '.venv312' : 'system');
+  // Dépendances optionnelles : sans elles, on n'essaie même pas de démarrer le serveur (aucune erreur parasite).
+  try {
+    const chk = require('child_process').spawnSync(pythonBin, ['-c', 'import fastapi, uvicorn, cv2, numpy'], { timeout: 15000, windowsHide: true });
+    if (chk.status !== 0) {
+      console.warn('[AI] Dépendances IA absentes (pip install -r ai/requirements.txt) : réparation par IA désactivée.');
+      return;
+    }
+  } catch (_) { return; }
   const env = {
     ...process.env,
     LAZARUS_AI_PORT:     AI_PORT,

@@ -3,6 +3,20 @@
 @tailwind utilities;
 
 @layer base {
+  :root, :root.dark {
+    --c-bg: 10 10 15; --c-bg-2: 18 18 26; --c-bg-3: 26 26 38;
+    --c-surface: 22 22 31; --c-surface-2: 30 30 46; --c-border: 42 42 62;
+    --c-primary: 108 99 255; --c-primary-hover: 125 117 255;
+    --c-accent: 255 107 107; --c-green: 78 205 196; --c-yellow: 255 230 109;
+    --c-text: 232 232 240; --c-text-muted: 136 136 168; --c-text-dim: 85 85 106;
+  }
+  :root.light {
+    --c-bg: 245 246 250; --c-bg-2: 255 255 255; --c-bg-3: 236 238 245;
+    --c-surface: 255 255 255; --c-surface-2: 240 241 247; --c-border: 213 216 228;
+    --c-primary: 91 82 240; --c-primary-hover: 74 65 224;
+    --c-accent: 229 72 77; --c-green: 18 165 148; --c-yellow: 181 137 0;
+    --c-text: 27 27 43; --c-text-muted: 85 87 112; --c-text-dim: 138 140 163;
+  }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     @apply bg-bg text-text font-sans antialiased;

@@ -94,8 +94,8 @@
     <button class="btn-outline">Watch Demo</button>
   </div>
   <div class="hero-stats">
-    <div class="stat"><div class="stat-n">11+</div><div class="stat-l">File Types Recovered</div></div>
-    <div class="stat"><div class="stat-n">3</div><div class="stat-l">File Systems (NTFS/EXT4/APFS)</div></div>
+    <div class="stat"><div class="stat-n">35+</div><div class="stat-l">Formats carved with structural validation</div></div>
+    <div class="stat"><div class="stat-n">5</div><div class="stat-l">File systems (NTFS, FAT, exFAT, ext2/3/4 + raw carving)</div></div>
     <div class="stat"><div class="stat-n">AI</div><div class="stat-l">Powered Image Repair</div></div>
     <div class="stat"><div class="stat-n">1TB+</div><div class="stat-l">Disk Support</div></div>
   </div>
@@ -103,7 +103,7 @@
 
 <section class="section" id="features">
   <h2>Everything You Need to Recover Data</h2>
-  <p class="section-sub">Production-grade recovery engine built in C++17 with AI augmentation.</p>
+  <p class="section-sub">Read-only recovery engine: every byte is read from your disk, none is ever written to it.</p>
   <div class="grid-3">
     <div class="card">
       <div class="card-icon" style="background:rgba(108,99,255,.15)">🔍</div>
@@ -112,8 +112,8 @@
     </div>
     <div class="card">
       <div class="card-icon" style="background:rgba(255,107,107,.15)">📁</div>
-      <h3>NTFS / EXT4 / APFS</h3>
-      <p>Full MFT parsing, inode table scanning, and APFS container detection for all major file systems.</p>
+      <h3>NTFS / FAT / exFAT / ext</h3>
+      <p>Fragmented MFT parsing, deleted-file paths, recycle-bin names, FAT long names, exFAT, ext extents and overwrite detection from the real allocation bitmap.</p>
     </div>
     <div class="card">
       <div class="card-icon" style="background:rgba(78,205,196,.15)">🎯</div>
@@ -157,7 +157,7 @@
       <div><span class="price-val">$49</span><span class="price-period">one-time</span></div>
       <ul class="price-features">
         <li>Full file recovery</li>
-        <li>NTFS + EXT4 + APFS</li>
+        <li>NTFS + FAT + exFAT + ext</li>
         <li>Video recovery</li>
         <li>Priority support</li>
       </ul>
