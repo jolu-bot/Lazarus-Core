@@ -280,7 +280,7 @@ function setupScanIPC(ipcMain) {
     if (process.platform !== 'win32') return { success: false, message: 'Relancez avec sudo.' };
     try {
       const { app } = require('electron');
-      const exe = process.execPath;
+      const exe = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;   // version portable : relancer l'exécutable d'origine, pas la copie temporaire
       const args = app.isPackaged ? [] : [app.getAppPath()];
       const argList = args.map((a) => "'" + a.replace(/'/g, "''") + "'").join(',');
       const ps = "Start-Process -FilePath '" + exe.replace(/'/g, "''") + "' " + (argList ? '-ArgumentList ' + argList + ' ' : '') + '-Verb RunAs';
