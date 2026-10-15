@@ -30,7 +30,7 @@ export default function ProgressBar({ percent = 0, filesFound = 0, state = 'scan
             transition={{ duration: 0.3 }}
           />
         </div>
-        <div className="flex items-center gap-3 text-xs text-text-dim font-mono flex-shrink-0">
+        <div className="flex items-center gap-3 text-xs text-text-dim font-mono shrink-0">
           <span className="text-text font-semibold">{done ? '✓' : `${Math.round(percent)} %`}</span>
           <span>{filesFound.toLocaleString()} {t('scan.files')}</span>
           {!done && !stopped && speed > 0 && <span className="text-primary">{formatBytes(speed)}/s</span>}

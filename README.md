@@ -1,9 +1,45 @@
 # LAZARUS CORE — *Récupérez l'impossible*
 
 Logiciel de récupération de données **en lecture seule** : Lazarus Core ne modifie jamais le support analysé.
-Interface Electron/React (français et anglais) + moteur Python autonome, open source, sans limite artificielle.
+Interface Electron/React (français et anglais) + moteur Python **intégré** (aucune installation de Python, Node ou de service
+tiers), open source, sans limite artificielle, sans licence à acheter.
 
 > **Données déjà perdues ? Lisez d'abord le [guide d'urgence](#-données-perdues--que-faire-maintenant).**
+
+## Télécharger et utiliser
+
+Deux exécutables autonomes sont produits par `.\scripts\build-all.ps1` (ou par le workflow GitHub « Build and Release ») :
+
+| Fichier | Usage |
+|---|---|
+| `Lazarus Core-Setup-2.1.0.exe` | Installateur Windows (raccourcis, désinstallation) |
+| `Lazarus Core-Portable-2.1.0.exe` | Un seul fichier, à lancer depuis une clé USB — **idéal pour ne rien écrire sur le disque à récupérer** |
+
+Aucun prérequis : le moteur de récupération (Python, OpenCV, NumPy, cryptographie) est embarqué.
+Pour lire un disque brut, cliquez sur **« Relancer en administrateur »** dans le bandeau rouge au premier lancement.
+
+### Parcours guidé (« Assistant »)
+Au premier lancement, l'**Assistant** demande ce qui s'est passé — fichiers supprimés, disque formaté, disque « RAW », photos
+d'une carte SD, disque qui claque, fichier endommagé — et règle lui-même l'analyse (rapide / approfondie, types de fichiers,
+clonage conseillé avant toute lecture d'un disque défaillant).
+
+### Réparation intelligente intégrée
+Aucun serveur, aucun modèle à télécharger : tout est dans le moteur. Menu **Outils → Réparer un fichier** ou bouton
+*Réparation intelligente* dans l'aperçu d'un fichier récupéré. Le fichier d'origine n'est **jamais** modifié.
+
+| Format | Ce qui est fait |
+|---|---|
+| **JPEG** | diagnostic (EOI absent, octets parasites, % du bas manquant) ; image tronquée complétée par estimation (jusqu'à 50 % de la hauteur, signalée comme telle) ; **greffe d'en-tête** depuis une photo de référence du même appareil quand l'en-tête est détruit |
+| **PNG / BMP** | lignes de pixels complètes sauvées au bit près, CRC recalculés, lignes manquantes complétées |
+| **Option « Améliorer »** | débruitage adaptatif (bruit mesuré), contraste local, netteté légère |
+| **DOCX/XLSX/PPTX/ODT/ZIP** | répertoire central reconstruit ; si l'archive est irréparable, **texte du document extrait** à part |
+| **PDF** | table xref reconstruite ; texte extrait des flux |
+| **SQLite** | zones détruites sautées, toutes les lignes lisibles recopiées dans une base neuve |
+| **MP3 / WAV / MP4** | resynchronisation des trames, en-têtes recalculés, atome `mdat` tronqué |
+| **DOC/XLS et inconnus** | extraction des chaînes ASCII/UTF-16 lisibles |
+
+> Une zone d'image « reconstruite » est une **estimation plausible**, pas la donnée d'origine : l'interface l'indique et affiche
+> la part réellement retrouvée (« 66,7 % »). Aucun outil ne peut recréer des pixels qui n'existent plus.
 
 ---
 
@@ -60,9 +96,10 @@ reconstruction de fichiers fragmentés sans métadonnées. Ces points figurent d
 | **ext2/3/4** | Inodes supprimés (extents, blocs indirects), noms dans le *slack* des répertoires, bitmap de blocs |
 | **Partitions** | MBR, GPT (table de secours), étendues, **partitions perdues** retrouvées par signature |
 | **Récupération** | Extraction par lots, arborescence conservée, noms sûrs, SHA-256, vérification d'intégrité (ZIP, SQLite, PNG, JPEG, PDF, MP4…), blocage si destination sur le disque source |
-| **Réparation** | JPEG, PNG, PDF (xref), WAV, MP3, MP4 (mdat tronqué), ZIP/OOXML + réparation d'image par IA (optionnelle) |
+| **Réparation** | Diagnostic + réparation intégrés : JPEG/PNG tronqués (reconstruction signalée), greffe d'en-tête JPEG, PDF, Office/ZIP (+ extraction du texte), SQLite, MP3/WAV/MP4 — voir [Réparation intelligente](#réparation-intelligente-intégrée) |
 | **Sessions** | Chaque analyse est sauvegardée ; on peut la rouvrir ou **la reprendre** après un arrêt |
-| **Outils** | Santé des disques · RAID virtuel · BitLocker · Recherche de contenu · Explorateur hexadécimal |
+| **Outils** | Réparer un fichier · Santé des disques · RAID virtuel · BitLocker · Recherche de contenu · Explorateur hexadécimal |
+| **Assistant** | Parcours guidé par situation (supprimé, formaté, RAW, carte SD, disque défaillant, fichier abîmé) |
 | **Auto-test** | `Paramètres → Auto-test du moteur NTFS` compare 30 fichiers du vrai disque (SHA-256) |
 
 ### Limites
@@ -113,10 +150,12 @@ python app/main/ipc/scan_backend.py recover --request-file rec.json   # {"sessio
 python app/main/ipc/scan_backend.py smart | enumerate | vss-list | selftest --volume C:
 ```
 
-### Installateur Windows
+### Exécutables Windows (installateur + portable)
 ```powershell
-.\scripts\build-all.ps1          # tests, interface, moteur autonome (PyInstaller), installateur NSIS
+.\scripts\build-all.ps1          # tests, interface, moteur autonome (PyInstaller, mode dossier), installateur NSIS + portable
+# résultat : app\dist-build\Lazarus Core-Setup-2.1.0.exe  et  Lazarus Core-Portable-2.1.0.exe
 ```
+Le premier lancement du portable décompresse l'application (~25 s) ; l'installateur démarre instantanément.
 
 ---
 
@@ -132,12 +171,16 @@ app/main/ipc/
    carver  sizers  tools                   carving, validateurs de format, recherche/hexa/miniatures
    recover  repair  imager  report  system  lznt1
 app/renderer/         React + Zustand (fr/en), listes virtualisées (centaines de milliers d'éléments), galerie
-ai/  server/  tests/engine  tests/bridge  tests/e2e  tests/tools
+server/  tests/engine  tests/bridge  tests/e2e  tests/tools
+   (réparation : engine/aifix.py + inpaint.py — intégrée au moteur, plus aucun serveur ni modèle externe)
 ```
 
 ## Sécurité
 `contextIsolation`, `sandbox`, CSP stricte, liste blanche IPC ; sources ouvertes en lecture seule ; noms récupérés assainis ;
-rapports HTML échappés ; serveur de licences : clé admin obligatoire, comparaison à temps constant.
+rapports HTML échappés ; serveur de licences : clé admin obligatoire, comparaison à temps constant, aucun secret par défaut.
+Plus de serveur HTTP local pour la réparation (ancienne surface d'attaque supprimée). `npm audit` : **0 vulnérabilité** sur
+l'application, l'interface, le serveur et les tests ; l'audit est rejoué à chaque intégration continue et Dependabot surveille
+npm, pip et GitHub Actions.
 
 ## Licence
 Mode local gratuit par défaut. Serveur de licences et Stripe optionnels.

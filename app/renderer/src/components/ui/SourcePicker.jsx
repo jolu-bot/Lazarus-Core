@@ -10,7 +10,7 @@ const lzr = window.lazarus;
 
 function iconFor(d) {
   if (d.kind === 'image') return FileDigit;
-  if (d.kind === 'shadow') return History;
+  if (d.kind === 'shadow-sm') return History;
   if (d.kind === 'virtual') return Boxes;
   if (d.kind === 'volume') return Layers;
   if ((d.interface || '').toLowerCase().includes('usb')) return Usb;
@@ -59,7 +59,7 @@ export default function SourcePicker({ value, onChange, includeShadows = true, d
         onClick={() => setOpen((o) => !o)}
         className="flex items-center gap-2 bg-surface-2 border border-surface-border rounded-lg px-3 py-2 text-sm hover:border-primary/50 transition-colors min-w-[300px] max-w-[460px] disabled:opacity-50"
       >
-        <Sel size={15} className="text-primary flex-shrink-0" />
+        <Sel size={15} className="text-primary shrink-0" />
         <span className="flex-1 text-left text-text truncate">{value ? value.label || value.path : drives.length === 0 ? t('scan.detecting') : t('scan.select')}</span>
         {value?.totalSize > 0 && <span className="text-xs text-text-dim font-mono">{formatBytes(value.totalSize)}</span>}
         <ChevronDown size={13} className="text-text-dim" />
@@ -82,7 +82,7 @@ export default function SourcePicker({ value, onChange, includeShadows = true, d
                       className={clsx('w-full flex items-center gap-2 px-4 py-2 text-sm text-left hover:bg-primary/10 transition-colors',
                         d.path === value?.path && 'text-primary bg-primary/5', d.kind === 'volume' && 'pl-8')}
                     >
-                      <Icon size={14} className="flex-shrink-0" />
+                      <Icon size={14} className="shrink-0" />
                       <div className="flex-1 min-w-0">
                         <div className="font-medium truncate">{d.label || d.path}</div>
                         <div className="text-xs text-text-dim font-mono truncate">

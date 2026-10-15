@@ -13,7 +13,7 @@ const cors      = require('cors');
 const helmet    = require('helmet');
 const rateLimit = require('express-rate-limit');
 const crypto    = require('crypto');
-const { v4: uuidv4 } = require('uuid');
+const uuidv4 = () => crypto.randomUUID();
 const Database  = require('better-sqlite3');
 require('dotenv').config();
 

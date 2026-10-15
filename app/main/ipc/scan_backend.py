@@ -22,7 +22,7 @@ try:                                    # sortie UTF-8 quelle que soit la page d
 except Exception:
     pass
 
-from engine import __version__, carver, ext as ext_engine, fat, imager, ntfs, partitions, recover, repair, report  # noqa: E402
+from engine import __version__, aifix, carver, ext as ext_engine, fat, imager, ntfs, partitions, recover, repair, report  # noqa: E402
 from engine import system, tools  # noqa: E402
 from engine.common import STOP, FileSink, Progress, compute_health, emit, log  # noqa: E402
 from engine.devio import DeviceError, Reader, open_reader  # noqa: E402
@@ -323,7 +323,7 @@ def _main():
     ap = argparse.ArgumentParser(prog='scan_backend', description='Lazarus Core 2.0 engine')
     sub = ap.add_subparsers(dest='cmd', required=True)
     for name in ('scan', 'recover', 'preview-record', 'repair', 'report', 'check-dest', 'image-disk', 'partitions',
-                 'hex-read', 'search', 'export-range', 'raid-detect', 'bitlocker-probe', 'thumbs'):
+                 'hex-read', 'search', 'export-range', 'raid-detect', 'bitlocker-probe', 'thumbs', 'diagnose', 'fix'):
         sp = sub.add_parser(name)
         sp.add_argument('--request-file')
         sp.add_argument('--json')
@@ -365,7 +365,7 @@ def _main():
                           'platform': sys.platform, 'cwd': os.getcwd(), 'signatures': len(carver.SIGNATURES)}))
     elif args.cmd == 'engines':
         print(json.dumps({'version': __version__, 'filesystems': ['ntfs', 'fat12', 'fat16', 'fat32', 'exfat', 'ext2', 'ext3', 'ext4'],
-                          'carving': carver.SUPPORTED_EXTENSIONS, 'repair': sorted(repair.REPAIRERS)}))
+                          'carving': carver.SUPPORTED_EXTENSIONS, 'repair': sorted(repair.REPAIRERS), 'ai': aifix.capabilities()}))
     elif args.cmd == 'scan':
         req = load_request(args)
         if args.device:
@@ -398,6 +398,14 @@ def _main():
         res = repair.repair_file(src, f.get('extension') or req.get('extension') or '', req.get('outputPath'))
         res['repaired'] = bool(res.get('success') and res.get('changed'))
         print(json.dumps(res))
+    elif args.cmd == 'diagnose':
+        r = load_request(args)
+        print(json.dumps(aifix.analyze(r.get('path', ''))))
+    elif args.cmd == 'fix':
+        r = load_request(args)
+        src = r.get('path', '')
+        print(json.dumps(aifix.repair_auto(src, r.get('outputDir') or os.path.dirname(os.path.abspath(src)), r.get('reference') or '',
+                                           bool(r.get('enhance')))))
     elif args.cmd == 'report':
         req = json.loads(args.report_json) if getattr(args, 'report_json', None) else load_request(args)
         out = args.output_dir or req.get('outputDir') or str(Path.home() / 'LazarusReports')

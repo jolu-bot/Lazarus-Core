@@ -8,10 +8,10 @@ export default function TitleBar() {
   const t = useT();
   return (
     <div className="drag-region flex items-center justify-between h-10 px-4
-                    bg-bg-2 border-b border-surface-border flex-shrink-0 z-50">
+                    bg-bg-2 border-b border-surface-border shrink-0 z-50">
       {/* Left: Logo */}
       <div className="flex items-center gap-2 no-drag">
-        <div className="w-6 h-6 rounded-full bg-gradient-to-br from-primary to-accent
+        <div className="w-6 h-6 rounded-full bg-linear-to-br from-primary to-accent
                         flex items-center justify-center shadow-glow-sm">
           <Cpu size={13} className="text-white" />
         </div>

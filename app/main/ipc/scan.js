@@ -50,10 +50,12 @@ function getEngine() {
   if (_engine) return _engine;
   const res = process.resourcesPath || '';
   const frozen = process.platform === 'win32' ? 'lazarus-engine.exe' : 'lazarus-engine';
-  const frozenPath = path.join(res, 'engine', frozen);
-  if (res && fs.existsSync(frozenPath)) {
-    _engine = { cmd: frozenPath, pre: [], script: false, kind: 'embedded' };
-    return _engine;
+  // moteur gelé : dossier PyInstaller (resources/engine/lazarus-engine/…) ou, à défaut, exécutable unique
+  for (const frozenPath of [path.join(res, 'engine', 'lazarus-engine', frozen), path.join(res, 'engine', frozen)]) {
+    if (res && fs.existsSync(frozenPath)) {
+      _engine = { cmd: frozenPath, pre: [], script: false, kind: 'embedded' };
+      return _engine;
+    }
   }
   const root = path.join(__dirname, '..', '..', '..');
   const cands = [];
@@ -443,33 +445,43 @@ function setupScanIPC(ipcMain) {
     catch (e) { return (file && file.health) || {}; }
   });
 
-  // ---- Réparation ----
+  // ---- Réparation (moteur intégré : aucun serveur, aucun modèle à télécharger) ----
+  let aiCaps = null;
+  ipcMain.handle('ai:health', async () => {
+    if (!aiCaps) {
+      try { const e = await runEngineJson('engines', [], 20000); aiCaps = Object.assign({ ok: !!(e.ai && e.ai.images) }, e.ai || {}); }
+      catch (_) { return { ok: false }; }
+    }
+    return aiCaps;
+  });
+
+  // Fichier à réparer : déjà récupéré, ou extrait à la volée du support avant diagnostic
+  async function ensureRecovered(event, file, outDir) {
+    if (file.outputPath && fs.existsSync(file.outputPath)) return file.outputPath;
+    const rec = await runSingleRecover(event, file.device, file, outDir);
+    if (!rec.success) throw new Error(rec.message || 'Récupération impossible avant réparation');
+    return rec.outputPath;
+  }
+
+  ipcMain.handle('scan:diagnose-file', async (event, args) => {
+    args = args || {};
+    const file = args.file || {};
+    try {
+      const src = await ensureRecovered(event, file, args.outputDir || path.join(os.homedir(), 'LazarusRecovered'));
+      const d = await runEngineJson('diagnose', [], 120000, { path: src });
+      return Object.assign({}, d, { sourcePath: src });
+    } catch (e) { return { success: false, message: e.message }; }
+  });
+
   ipcMain.handle('scan:repair-file', async (event, args) => {
     args = args || {};
     const file = args.file || {};
     const outDir = args.outputDir || path.join(os.homedir(), 'LazarusRecovered');
     try {
-      let src = file.outputPath && fs.existsSync(file.outputPath) ? file.outputPath : null;
-      if (!src) {
-        const rec = await runSingleRecover(event, file.device, file, outDir);
-        if (!rec.success) return { success: false, message: rec.message || 'Récupération impossible avant réparation' };
-        src = rec.outputPath;
-      }
-      const r = await runEngineJson('repair', [], 600000, { file, path: src });
-      let out = Object.assign({ health: file.health }, r);
-      // Réparation image par IA (optionnelle) pour les dégradations importantes
-      if (file.type === 1 && args.mode && args.mode !== 'minor') {
-        try {
-          const ai = require('../ai_process');
-          const FormData = require('form-data'); const axios = require('axios');
-          const form = new FormData(); form.append('file', fs.createReadStream(r.outputPath || src));
-          const resp = await axios.post('http://127.0.0.1:' + ai.AI_PORT + '/repair/image?enhance=true&use_ai=true', form,
-            { headers: Object.assign({}, form.getHeaders(), { 'x-api-key': ai.AI_SECRET }), timeout: 120000 });
-          if (resp.data && resp.data.success) {
-            out.image_b64 = resp.data.image_b64; out.confidence = resp.data.confidence; out.success = true; out.repaired = true;
-          }
-        } catch (e) { appendLog('WARN réparation IA: ' + e.message); }
-      }
+      const src = args.sourcePath && fs.existsSync(args.sourcePath) ? args.sourcePath : await ensureRecovered(event, file, outDir);
+      const reference = args.reference && fs.existsSync(args.reference) ? args.reference : '';
+      const out = Object.assign({ health: file.health },
+        await runEngineJson('fix', [], 900000, { path: src, outputDir: path.dirname(src), reference, enhance: !!args.enhance }));
       if (out.success && out.repaired) {
         const h = Object.assign({}, file.health || {});
         h.score = Math.min(100, (h.score || 50) + 25); h.repairMode = Math.max(0, (h.repairMode || 0) - 1);

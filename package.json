@@ -15,8 +15,6 @@
     "test": "npm run test:engine && npm run test:bridge",
     "test:engine": "python -m unittest discover -s tests/engine -p \"test_*.py\"",
     "test:bridge": "node --test tests/bridge/bridge.test.js",
-    "install:ai": "cd ai && pip install -r requirements.txt",
-    "start:ai": "cd ai && python server.py",
     "clean": "node scripts/clean.js"
   },
   "dependencies": {

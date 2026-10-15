@@ -24,16 +24,14 @@
     "axios": "^1.7.2",
     "electron-store": "^8.2.0",
     "electron-updater": "^6.1.8",
-    "form-data": "^4.0.0",
     "node-addon-api": "^8.1.0",
     "node-machine-id": "^1.1.12",
-    "stripe": "^15.12.0",
-    "uuid": "^10.0.0"
+    "stripe": "^15.12.0"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
-    "electron": "41.2.1",
-    "electron-builder": "^26.8.1",
+    "electron": "41.10.7",
+    "electron-builder": "^26.17.0",
     "wait-on": "^7.2.0"
   },
   "build": {
@@ -47,15 +45,6 @@
       "**/main/ipc/**/*.py"
     ],
     "extraResources": [
-      {
-        "from": "../ai",
-        "to": "ai",
-        "filter": [
-          "**/*",
-          "!**/__pycache__/**",
-          "!models/*.pth"
-        ]
-      },
       {
         "from": "engine-bin",
         "to": "engine",
@@ -71,10 +60,17 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "assets/icons/icon.ico",
-      "requestedExecutionLevel": "requireAdministrator"
+      "requestedExecutionLevel": "asInvoker",
+      "artifactName": "${productName}-${version}-${target}.${ext}"
     },
     "mac": {
       "target": [
@@ -108,9 +104,12 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "artifactName": "${productName}-Setup-${version}.${ext}",
+      "deleteAppDataOnUninstall": false,
+      "perMachine": false
     },
-    "electronVersion": "41.2.1",
+    "electronVersion": "41.10.7",
     "directories": {
       "output": "dist-build"
     },
@@ -121,6 +120,13 @@
       "package.json",
       "!**/main/ipc/photorec_win.exe",
       "!**/__pycache__/**"
-    ]
+    ],
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}.${ext}"
+    },
+    "compression": "normal"
+  },
+  "overrides": {
+    "global-agent": "^4.1.3"
   }
 }

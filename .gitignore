@@ -4,6 +4,11 @@ app/node_modules/
 app/renderer/node_modules/
 
 # Build outputs
+app/engine-bin/*
+!app/engine-bin/.gitkeep
+app/dist-build/
+build/
+dist-build/
 app/renderer/dist/
 app/dist/
 core/build/
@@ -14,7 +19,6 @@ core/Release/
 __pycache__/
 *.pyc
 *.pyo
-ai/models/*.pth
 *.egg-info/
 .venv/
 venv/

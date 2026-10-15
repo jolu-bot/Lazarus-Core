@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, Boxes, KeyRound, Search, Binary, RefreshCw, AlertTriangle, CheckCircle2, ShieldAlert, Plus, Trash2, Play, StopCircle, Download, Unlock } from 'lucide-react';
+import { Activity, Boxes, KeyRound, Search, Binary, RefreshCw, AlertTriangle, CheckCircle2, ShieldAlert, Plus, Trash2, Play, StopCircle, Download, Unlock, Wand2, FileCog } from 'lucide-react';
 import clsx from 'clsx';
 import { useAppStore } from '../../stores/useAppStore';
 import SourcePicker from '../ui/SourcePicker';
+import RepairDialog from './RepairDialog';
 import { formatBytes } from '../../utils/formatters';
 
 const lzr = window.lazarus;
@@ -14,9 +15,10 @@ function useL() {
 
 export default function ToolsView() {
   const L = useL();
-  const [tab, setTab] = useState('smart');
+  const [tab, setTab] = useState('repair');
   const [hexTarget, setHexTarget] = useState(null);
   const tabs = [
+    ['repair', Wand2, L('Réparer un fichier', 'Repair a file')],
     ['smart', Activity, L('Santé des disques', 'Disk health')],
     ['raid', Boxes, L('RAID virtuel', 'Virtual RAID')],
     ['bitlocker', KeyRound, 'BitLocker'],
@@ -25,7 +27,7 @@ export default function ToolsView() {
   ];
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="flex gap-1 px-5 pt-4 border-b border-surface-border bg-bg-2 flex-shrink-0 overflow-x-auto">
+      <div className="flex gap-1 px-5 pt-4 border-b border-surface-border bg-bg-2 shrink-0 overflow-x-auto">
         {tabs.map(([id, Icon, label]) => (
           <button key={id} onClick={() => setTab(id)}
             className={clsx('flex items-center gap-2 px-4 py-2 text-sm rounded-t-lg border-b-2 transition-colors whitespace-nowrap',
@@ -35,6 +37,7 @@ export default function ToolsView() {
         ))}
       </div>
       <div className="flex-1 overflow-y-auto p-6">
+        {tab === 'repair' && <RepairTab L={L} />}
         {tab === 'smart' && <SmartTab L={L} />}
         {tab === 'raid' && <RaidTab L={L} />}
         {tab === 'bitlocker' && <BitLockerTab L={L} />}
@@ -215,7 +218,7 @@ function BitLockerTab({ L }) {
       <p className="text-sm text-text-muted mb-4">{L('Si le disque est celui de Windows en cours d\'exécution, choisissez plutôt le VOLUME (C:) : Windows le déchiffre déjà. Pour un disque retiré, un autre PC ou une image, fournissez la clé de récupération (48 chiffres) ou le mot de passe. Le déchiffrement se fait à la volée, en lecture seule.',
         'If this is the running Windows disk, pick the VOLUME (C:) instead: Windows already decrypts it. For a removed disk, another PC or an image, supply the 48-digit recovery key or the password. Decryption is on-the-fly and read-only.')}</p>
       <SourcePicker value={src} onChange={pick} includeShadows={false} />
-      {err && <div className="mt-4 flex gap-2 text-sm text-accent bg-accent/10 border border-accent/30 rounded-lg p-3"><ShieldAlert size={16} className="flex-shrink-0" />{err}</div>}
+      {err && <div className="mt-4 flex gap-2 text-sm text-accent bg-accent/10 border border-accent/30 rounded-lg p-3"><ShieldAlert size={16} className="shrink-0" />{err}</div>}
       {sel && (
         <div className="mt-5 flex flex-col gap-3">
           {parts.length > 1 && <select onChange={(e) => choose(src, parts[Number(e.target.value)])} className="bg-surface-2 border border-surface-border rounded-lg px-2 py-1.5 text-text text-sm">
@@ -309,7 +312,7 @@ function SearchTab({ L, onHex }) {
               <button onClick={() => onHex({ device: src, offset: h.offset })} className="text-primary hover:underline">{L('Voir en hexa', 'View hex')}</button>
               <button onClick={() => exportHit(h)} className="text-primary hover:underline flex items-center gap-1"><Download size={11} />{L('Extraire 256 Ko', 'Extract 256 KB')}</button>
             </div>
-            <div className="mt-1 text-text break-words">{decodeSnippet(h)}</div>
+            <div className="mt-1 text-text wrap-break-word">{decodeSnippet(h)}</div>
           </div>
         ))}
         {!hits.length && <div className="p-4 text-sm text-text-dim">{running ? '…' : L('Aucun résultat pour l\'instant.', 'No results yet.')}</div>}
@@ -360,6 +363,41 @@ function HexTab({ L, target }) {
       </div>
       {err && <div className="text-sm text-accent mb-2">{err}</div>}
       <pre className="bg-[#050508] text-green-400/80 text-[11px] font-mono leading-relaxed p-4 rounded-xl overflow-auto max-h-[65vh] select-text">{lines.join('\n') || '—'}</pre>
+    </div>
+  );
+}
+
+const EXT_TYPE = { jpg: 1, jpeg: 1, png: 1, gif: 1, bmp: 1, mp4: 2, mov: 2, mp3: 3, wav: 3 };
+
+function RepairTab({ L }) {
+  const [target, setTarget] = useState(null);
+  const [open, setOpen] = useState(false);
+  const pick = async () => {
+    const f = await lzr?.invoke('dialog:openFile', { filters: [
+      { name: L('Fichiers réparables', 'Repairable files'), extensions: ['jpg', 'jpeg', 'png', 'bmp', 'gif', 'pdf', 'docx', 'xlsx', 'pptx', 'odt', 'ods', 'zip', 'sqlite', 'db', 'mp3', 'wav', 'mp4', 'mov', 'doc', 'xls'] },
+      { name: L('Tous les fichiers', 'All files'), extensions: ['*'] }] });
+    if (!f) return;
+    const name = f.split(/[\\/]/).pop();
+    const ext = (name.split('.').pop() || '').toLowerCase();
+    setTarget({ id: -1, name, path: f, outputPath: f, extension: ext, type: EXT_TYPE[ext] || 0, size: 0, device: '', health: {} });
+    setOpen(true);
+  };
+  return (
+    <div className="max-w-2xl flex flex-col gap-4">
+      <div className="flex items-center gap-3"><FileCog size={20} className="text-primary" />
+        <h2 className="text-lg font-semibold text-text">{L('Réparer un fichier endommagé', 'Repair a damaged file')}</h2></div>
+      <p className="text-sm text-text-muted">{L(
+        'Photos tronquées ou à en-tête détruit (JPEG, PNG), documents Office/PDF corrompus, bases SQLite abîmées, audio et vidéo : choisissez le fichier, Lazarus Core le diagnostique puis le répare. Le fichier d’origine n’est jamais modifié : une copie réparée est créée à côté.',
+        'Truncated photos or destroyed headers (JPEG, PNG), corrupted Office/PDF documents, damaged SQLite databases, audio and video: pick the file, Lazarus Core diagnoses then repairs it. The original is never modified: a repaired copy is created next to it.')}</p>
+      <button onClick={pick} className="self-start flex items-center gap-2 px-5 py-2.5 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary-hover shadow-glow-sm">
+        <Wand2 size={15} />{L('Choisir un fichier…', 'Choose a file…')}
+      </button>
+      <ul className="text-xs text-text-dim list-disc pl-5 flex flex-col gap-1">
+        <li>{L('Image tronquée : la partie manquante est reconstruite par estimation (jusqu’à 50 % de la hauteur) — elle est signalée comme telle.', 'Truncated image: the missing part is reconstructed by estimation (up to 50 % of the height) and flagged as such.')}</li>
+        <li>{L('En-tête JPEG détruit : fournissez une photo intacte du même appareil comme référence.', 'Destroyed JPEG header: provide an intact photo from the same camera as a reference.')}</li>
+        <li>{L('Document irréparable : le texte lisible est extrait dans un fichier séparé.', 'Unrepairable document: the readable text is extracted into a separate file.')}</li>
+      </ul>
+      {open && target && <RepairDialog file={target} originalSrc={null} onClose={() => setOpen(false)} />}
     </div>
   );
 }

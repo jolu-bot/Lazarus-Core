@@ -60,7 +60,7 @@ export default function RecoveryDialog() {
   return (
     <AnimatePresence>
       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-        className="fixed inset-0 z-[9000] bg-black/70 flex items-center justify-center p-6">
+        className="fixed inset-0 z-9000 bg-black/70 flex items-center justify-center p-6">
         <motion.div initial={{ scale: 0.96, y: 10 }} animate={{ scale: 1, y: 0 }}
           className="w-[720px] max-w-full max-h-[85vh] flex flex-col bg-bg-2 border border-surface-border rounded-2xl shadow-panel overflow-hidden">
           <div className="flex items-center gap-3 px-6 py-4 border-b border-surface-border">
@@ -86,7 +86,7 @@ export default function RecoveryDialog() {
 
                 {rec.blocked && (
                   <div className={clsx('flex gap-3 p-4 rounded-xl border text-sm', rec.blocked.soft ? 'border-yellow-500/30 bg-yellow-500/10 text-yellow-200' : 'border-red-500/40 bg-red-500/10 text-red-200')}>
-                    <ShieldAlert size={20} className="flex-shrink-0 mt-0.5" />
+                    <ShieldAlert size={20} className="shrink-0 mt-0.5" />
                     <div>
                       {!rec.blocked.soft && <div className="font-semibold mb-1">{t('recover.warnTitle')}</div>}
                       <div>{rec.blocked.soft ? rec.blocked.reason : t('recover.warnText')}</div>
@@ -172,7 +172,7 @@ function ResultList({ files }) {
           const [lbl, cls] = INTEGRITY[f.integrity] || INTEGRITY.inconnu;
           return (
             <div key={(f.id ?? i) + ':' + i} className="flex items-center gap-2 px-3 py-1.5 text-xs">
-              {f.success ? <CheckCircle2 size={13} className="text-accent-green flex-shrink-0" /> : <XCircle size={13} className="text-red-400 flex-shrink-0" />}
+              {f.success ? <CheckCircle2 size={13} className="text-accent-green shrink-0" /> : <XCircle size={13} className="text-red-400 shrink-0" />}
               <span className="flex-1 truncate text-text" title={f.outputPath || f.error}>{f.name}</span>
               {f.success ? <span className={clsx('font-mono', cls)} title={t('recover.integrity')}>{lbl}</span> : <span className="text-red-300 truncate max-w-[200px]">{f.error}</span>}
               {f.sha256 && <span className="font-mono text-text-dim hidden md:inline" title={f.sha256}>{f.sha256.slice(0, 10)}…</span>}

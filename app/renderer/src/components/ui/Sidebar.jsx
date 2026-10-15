@@ -44,7 +44,7 @@ export default function Sidebar() {
       <div className="relative group">
         <div className={clsx('w-10 h-10 rounded-xl flex items-center justify-center', aiAvailable ? 'text-accent-green' : 'text-text-dim')}><Sparkles size={16} /></div>
         <div className="absolute left-14 top-1/2 -translate-y-1/2 bg-surface-2 border border-surface-border rounded-lg px-3 py-1.5 opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50 shadow-panel">
-          <span className="text-xs text-text">IA : {aiAvailable ? 'en ligne' : 'hors ligne'}</span>
+          <span className="text-xs text-text">Réparation IA : {aiAvailable ? 'intégrée' : 'indisponible'}</span>
         </div>
       </div>
 

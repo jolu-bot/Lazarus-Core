@@ -55,7 +55,7 @@ export default function HistoryView() {
         <div className="flex flex-col gap-3 max-w-3xl">
           {sessions.map((m) => (
             <div key={m.id} className="bg-surface-2 border border-surface-border rounded-xl p-4 flex items-center gap-4">
-              <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0"><HardDrive size={18} className="text-primary" /></div>
+              <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0"><HardDrive size={18} className="text-primary" /></div>
               <div className="flex-1 min-w-0">
                 <div className="text-sm font-medium text-text truncate">{m.label || m.device || '—'}</div>
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-dim mt-1">

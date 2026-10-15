@@ -137,13 +137,13 @@ export default function LicenseView() {
                 <ul className="flex-1 space-y-1.5">
                   {plan.features.map((f) => (
                     <li key={f} className="flex items-start gap-1.5 text-xs text-text-muted">
-                      <CheckCircle2 size={12} className="text-accent-green mt-0.5 flex-shrink-0" />
+                      <CheckCircle2 size={12} className="text-accent-green mt-0.5 shrink-0" />
                       {f}
                     </li>
                   ))}
                   {plan.locked?.map((f) => (
                     <li key={f} className="flex items-start gap-1.5 text-xs text-text-dim line-through">
-                      <span className="w-3 flex-shrink-0" />
+                      <span className="w-3 shrink-0" />
                       {f}
                     </li>
                   ))}
@@ -179,7 +179,7 @@ export default function LicenseView() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               className="bg-bg border border-surface-border rounded-lg px-4 py-2.5
-                         text-sm text-text placeholder-text-dim outline-none
+                         text-sm text-text placeholder-text-dim outline-hidden
                          focus:border-primary/50 transition-colors"
             />
             <div className="flex gap-2">
@@ -189,7 +189,7 @@ export default function LicenseView() {
                 value={key}
                 onChange={(e) => setKey(e.target.value)}
                 className="flex-1 bg-bg border border-surface-border rounded-lg px-4 py-2.5
-                           text-sm text-text placeholder-text-dim outline-none font-mono
+                           text-sm text-text placeholder-text-dim outline-hidden font-mono
                            focus:border-primary/50 transition-colors"
               />
               <button

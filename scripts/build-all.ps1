@@ -3,7 +3,7 @@
     LAZARUS CORE - script de construction complet (Windows).
 .DESCRIPTION
     Installe les dependances, construit l'interface, execute les tests, gele le moteur Python en
-    executable autonome (PyInstaller) puis produit l'installateur NSIS.
+    executable autonome (PyInstaller) puis produit l'installateur NSIS et la version portable.
 .PARAMETER SkipTests
     Ne pas executer les tests automatises.
 .PARAMETER SkipEngine
@@ -63,5 +63,5 @@ if (-not $SkipEngine) {
 
 Section "Installateur"
 $env:CSC_IDENTITY_AUTO_DISCOVERY = 'false'
-Run "$root\app" "npx electron-builder --win nsis --publish never"
-Ok "Installateur dans app/dist-build"
+Run "$root\app" "npx electron-builder --win nsis portable --publish never"
+Ok "Installateur et version portable dans app/dist-build"

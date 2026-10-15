@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Play, StopCircle, Settings2, RefreshCw, ShieldAlert, AlertTriangle, Layers } from 'lucide-react';
+import { Play, StopCircle, Settings2, RefreshCw, ShieldAlert, AlertTriangle, Layers, Compass } from 'lucide-react';
 import clsx from 'clsx';
 import { useAppStore, MAX_ITEMS } from '../../stores/useAppStore';
 import FileList from './FileList';
 import PreviewPanel from './PreviewPanel';
 import RecoveryDialog from './RecoveryDialog';
+import AssistantDialog from './AssistantDialog';
 import ProgressBar from '../ui/ProgressBar';
 import SourcePicker from '../ui/SourcePicker';
 import { formatBytes } from '../../utils/formatters';
@@ -38,6 +39,7 @@ export default function ScanView() {
   const overflowCount = useAppStore((s) => s.overflowCount);
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [busyStart, setBusyStart] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(() => { try { return !localStorage.getItem('lz-assistant-seen'); } catch { return true; } });
 
   const refreshDrives = () => {
     lzr?.invoke('scan:enumerate-drives', true).then((d) => {
@@ -63,9 +65,11 @@ export default function ScanView() {
   const isScanning = scanState === 'scanning' || scanState === 'stopping';
 
   const startScan = async () => {
+    const s = useAppStore.getState();
+    const selectedDrive = s.selectedDrive;          // état courant (l'assistant modifie options et source juste avant d'appeler)
+    const scanOptions = s.scanOptions;
     if (!selectedDrive || busyStart) return;
     setBusyStart(true);
-    const s = useAppStore.getState();
     s.clearFiles(); s.clearWarnings(); s.setLayout(null); s.setScanResult(null); s.setSessionId(null);
     s.setScanState('scanning');
     s.setScanStartTime(Date.now());
@@ -106,7 +110,7 @@ export default function ScanView() {
       {diag && diag.admin === false && <AdminBanner />}
       {diag && diag.error && <EngineBanner message={diag.error} />}
 
-      <div className="flex items-center gap-3 px-5 py-3 bg-bg-2 border-b border-surface-border flex-shrink-0 flex-wrap">
+      <div className="flex items-center gap-3 px-5 py-3 bg-bg-2 border-b border-surface-border shrink-0 flex-wrap">
         <SourcePicker value={selectedDrive} onChange={selectDrive} disabled={isScanning} />
         <button onClick={refreshDrives} title={t('scan.refresh')} disabled={isScanning}
           className="p-2 rounded-lg border border-surface-border text-text-dim hover:text-text hover:border-primary/30 transition-colors disabled:opacity-40">
@@ -126,6 +130,11 @@ export default function ScanView() {
           className={clsx('flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm border transition-colors',
             optionsOpen ? 'border-primary/50 text-primary bg-primary/10' : 'border-surface-border text-text-dim hover:text-text hover:border-primary/30')}>
           <Settings2 size={14} />{t('scan.options')}
+        </button>
+
+        <button onClick={() => setAssistantOpen(true)} disabled={isScanning} title={t('assistant.title')}
+          className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm border border-surface-border text-text-dim hover:text-text hover:border-primary/30 transition-colors disabled:opacity-40">
+          <Compass size={14} />{t('assistant.btn')}
         </button>
 
         <div className="flex-1" />
@@ -151,7 +160,7 @@ export default function ScanView() {
                 ['enableCarving', 'scan.opt.carving'], ['carveAll', 'scan.opt.carveAll'], ['includeExisting', 'scan.opt.existing'], ['deepScan', 'scan.opt.deep']].map(([key, label]) => (
                 <label key={key} className="flex items-center gap-2 cursor-pointer">
                   <input type="checkbox" checked={!!scanOptions[key]} disabled={isScanning}
-                    onChange={(e) => setScanOptions({ [key]: e.target.checked })} className="accent-primary w-4 h-4 rounded" />
+                    onChange={(e) => setScanOptions({ [key]: e.target.checked })} className="accent-primary w-4 h-4 rounded-sm" />
                   <span className="text-sm text-text-muted">{t(label)}</span>
                 </label>
               ))}
@@ -159,7 +168,7 @@ export default function ScanView() {
             <div className="flex flex-wrap items-center gap-2 px-5 pb-3">
               <label className="flex items-center gap-2 cursor-pointer mr-3">
                 <input type="checkbox" checked={!!scanOptions.carveText} disabled={isScanning}
-                  onChange={(e) => setScanOptions({ carveText: e.target.checked })} className="accent-primary w-4 h-4 rounded" />
+                  onChange={(e) => setScanOptions({ carveText: e.target.checked })} className="accent-primary w-4 h-4 rounded-sm" />
                 <span className="text-sm text-text-muted">{t('scan.opt.carveText')}</span>
               </label>
               <span className="text-xs text-text-dim">{t('scan.opt.cats')} :</span>
@@ -186,13 +195,13 @@ export default function ScanView() {
 
       {overflowCount > 0 && (
         <div className="px-5 py-2 bg-yellow-500/10 border-b border-yellow-500/20 text-xs text-yellow-300 flex items-start gap-2">
-          <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />{t('scan.overflow', { max: MAX_ITEMS.toLocaleString(), n: overflowCount.toLocaleString() })}
+          <AlertTriangle size={13} className="mt-0.5 shrink-0" />{t('scan.overflow', { max: MAX_ITEMS.toLocaleString(), n: overflowCount.toLocaleString() })}
         </div>
       )}
 
       {layout?.partitions?.some((p) => p.fs === 'bitlocker' || p.encrypted) && (
         <div className="flex items-center gap-3 px-5 py-2 bg-primary/10 border-b border-primary/20 text-sm">
-          <ShieldAlert size={16} className="text-primary flex-shrink-0" />
+          <ShieldAlert size={16} className="text-primary shrink-0" />
           <span className="flex-1 text-text-muted">{t('scan.bitlocker')}</span>
           <button onClick={() => useAppStore.getState().setView('tools')} className="px-3 py-1 rounded-lg bg-primary/20 border border-primary/40 text-primary text-xs font-semibold">{t('scan.bitlocker.btn')}</button>
         </div>
@@ -201,16 +210,16 @@ export default function ScanView() {
       {warnings.length > 0 && (
         <div className="px-5 py-2 bg-yellow-500/10 border-b border-yellow-500/20 flex flex-col gap-1">
           {warnings.map((w) => (
-            <div key={w} className="flex items-start gap-2 text-xs text-yellow-300"><AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />{w}</div>
+            <div key={w} className="flex items-start gap-2 text-xs text-yellow-300"><AlertTriangle size={13} className="mt-0.5 shrink-0" />{w}</div>
           ))}
         </div>
       )}
 
       {layout?.partitions?.length > 0 && (
         <div className="flex items-center gap-2 px-5 py-1.5 bg-bg-2 border-b border-surface-border text-[11px] text-text-dim overflow-x-auto">
-          <Layers size={12} className="flex-shrink-0" /><span className="flex-shrink-0">{t('scan.layout')} :</span>
+          <Layers size={12} className="shrink-0" /><span className="shrink-0">{t('scan.layout')} :</span>
           {layout.partitions.map((p, i) => (
-            <span key={i} className={clsx('px-2 py-0.5 rounded bg-surface-2 font-mono whitespace-nowrap', p.source === 'signature' && 'text-primary border border-primary/30')}>
+            <span key={i} className={clsx('px-2 py-0.5 rounded-sm bg-surface-2 font-mono whitespace-nowrap', p.source === 'signature' && 'text-primary border border-primary/30')}>
               {p.fs ? p.fs.toUpperCase() : '?'} · {formatBytes(p.size)}{p.desc ? ` · ${p.desc}` : ''}
             </span>
           ))}
@@ -218,7 +227,7 @@ export default function ScanView() {
       )}
 
       {(isScanning || scanState === 'done' || scanState === 'stopped' || scanState === 'error') && (
-        <div className="px-5 py-2 bg-bg-2 border-b border-surface-border flex-shrink-0">
+        <div className="px-5 py-2 bg-bg-2 border-b border-surface-border shrink-0">
           <ProgressBar
             percent={progress.percent || 0} filesFound={progress.filesFound || 0}
             state={scanState === 'stopping' ? 'scanning' : scanState}
@@ -234,6 +243,7 @@ export default function ScanView() {
         <PreviewPanel />
       </div>
       <RecoveryDialog />
+      {assistantOpen && <AssistantDialog onClose={() => setAssistantOpen(false)} onLaunch={startScan} />}
     </div>
   );
 }
@@ -242,7 +252,7 @@ function AdminBanner() {
   const t = useT();
   return (
     <div className="flex items-center gap-3 px-5 py-2.5 bg-red-500/10 border-b border-red-500/30 text-sm">
-      <ShieldAlert size={18} className="text-accent flex-shrink-0" />
+      <ShieldAlert size={18} className="text-accent shrink-0" />
       <div className="flex-1">
         <span className="font-semibold text-accent">{t('banner.admin.title')}</span>
         <span className="text-text-muted ml-2">{t('banner.admin.text')}</span>
@@ -259,7 +269,7 @@ function EngineBanner({ message }) {
   const t = useT();
   return (
     <div className="flex items-center gap-3 px-5 py-2.5 bg-red-500/10 border-b border-red-500/30 text-sm">
-      <AlertTriangle size={18} className="text-accent flex-shrink-0" />
+      <AlertTriangle size={18} className="text-accent shrink-0" />
       <div className="flex-1"><span className="font-semibold text-accent">{t('banner.engine.title')}</span><span className="text-text-muted ml-2">{message}</span></div>
     </div>
   );

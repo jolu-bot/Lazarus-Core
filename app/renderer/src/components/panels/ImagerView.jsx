@@ -65,7 +65,7 @@ export default function ImagerView() {
 
         {warn && (
           <div className="flex gap-3 p-4 rounded-xl border border-red-500/40 bg-red-500/10 text-red-200 text-sm">
-            <ShieldAlert size={20} className="flex-shrink-0" /><div>{t('recover.warnText')}</div>
+            <ShieldAlert size={20} className="shrink-0" /><div>{t('recover.warnText')}</div>
           </div>
         )}
 

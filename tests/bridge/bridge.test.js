@@ -125,3 +125,27 @@ test('destination sur le support source refusée', async () => {
   const chk = await handlers['scan:check-dest']({}, imgPath, path.join(tmp, 'x'));
   assert.strictEqual(typeof chk.safe, 'boolean');
 });
+
+test('réparation intégrée : diagnostic puis extraction du texte d\'un PDF sans xref', async () => {
+  const zlib = require('zlib');
+  const comp = zlib.deflateSync(Buffer.from('BT /F1 12 Tf (Facture 2026 Lazarus) Tj ET'));
+  const pdf = Buffer.concat([
+    Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n'
+      + '3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n4 0 obj\n<< /Length ' + comp.length + ' /Filter /FlateDecode >>\nstream\n'),
+    comp, Buffer.from('\nendstream\nendobj\n')]);
+  const src = path.join(tmp, 'facture.pdf');
+  fs.writeFileSync(src, pdf);
+  const file = { id: -1, name: 'facture.pdf', outputPath: src, extension: 'pdf', health: {} };
+  const h = await handlers['ai:health']();
+  assert.strictEqual(typeof h.ok, 'boolean');
+  const d = await handlers['scan:diagnose-file']({}, { file });
+  assert.strictEqual(d.success, true, JSON.stringify(d));
+  assert.strictEqual(d.format, 'pdf');
+  assert.strictEqual(d.healthy, false);
+  const r = await handlers['scan:repair-file']({}, { file, sourcePath: d.sourcePath });
+  assert.strictEqual(r.success, true, JSON.stringify(r));
+  const txt = r.outputs.find((p) => p.endsWith('_texte.txt'));
+  assert.ok(txt, 'texte extrait');
+  assert.ok(fs.readFileSync(txt, 'utf8').includes('Facture 2026 Lazarus'));
+  assert.ok(fs.readFileSync(src).equals(pdf), 'le fichier d\'origine n\'est jamais modifié');
+});

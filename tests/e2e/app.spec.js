@@ -45,3 +45,15 @@ test('l\'énumération des disques répond', async () => {
   const drives = await page.evaluate(() => window.lazarus.invoke('scan:enumerate-drives', true));
   expect(Array.isArray(drives)).toBe(true);
 });
+
+test('la réparation intégrée est disponible (aucun serveur externe)', async () => {
+  const h = await page.evaluate(() => window.lazarus.invoke('ai:health'));
+  expect(h.ok).toBe(true);
+  expect(h.images).toBe(true);
+});
+
+test('l\'onglet « Réparer un fichier » est proposé dans les outils', async () => {
+  await page.evaluate(() => document.querySelectorAll('.w-16 button')[2].click());
+  await page.waitForTimeout(400);
+  expect(await page.evaluate(() => document.body.innerText)).toContain('Réparer un fichier');
+});

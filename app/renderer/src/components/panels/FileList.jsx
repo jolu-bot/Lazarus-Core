@@ -97,12 +97,12 @@ export default function FileList() {
 
   const items = rv.getVirtualItems();
   return (
-    <div className="flex flex-col w-[520px] min-w-[420px] border-r border-surface-border flex-shrink-0 bg-bg">
+    <div className="flex flex-col w-[520px] min-w-[420px] border-r border-surface-border shrink-0 bg-bg">
       <div className="flex flex-col gap-2 px-3 py-2 border-b border-surface-border bg-bg-2">
         <div className="flex items-center gap-2 bg-surface rounded-lg px-3 py-1.5 border border-surface-border focus-within:border-primary/50 transition-colors">
           <Search size={13} className="text-text-dim" />
           <input type="text" placeholder={t('files.search')} value={searchDraft} onChange={(e) => onSearch(e.target.value)}
-            className="flex-1 bg-transparent text-sm text-text placeholder-text-dim outline-none" />
+            className="flex-1 bg-transparent text-sm text-text placeholder-text-dim outline-hidden" />
         </div>
         <div className="flex gap-1 overflow-x-auto">
           {FILTERS.map(([id, label]) => (
@@ -125,18 +125,18 @@ export default function FileList() {
           <span className="font-mono text-text-dim w-9 text-right">{filter.minHealth || 0} %</span>
           <span className="text-text-dim">{t('files.extension')}</span>
           <input type="text" placeholder="jpg" value={filter.ext || ''} onChange={(e) => setFilter({ ext: e.target.value.replace(/^\.+/, '').toLowerCase() })}
-            className="col-span-2 bg-surface-2 border border-surface-border rounded-lg px-2 py-0.5 text-xs text-text outline-none focus:border-primary/50" />
+            className="col-span-2 bg-surface-2 border border-surface-border rounded-lg px-2 py-0.5 text-xs text-text outline-hidden focus:border-primary/50" />
           <span className="text-text-dim">{t('files.source')}</span>
           <select value={filter.source || 'all'} onChange={(e) => setFilter({ source: e.target.value })}
-            className="col-span-2 bg-surface-2 border border-surface-border rounded-lg px-2 py-0.5 text-xs text-text outline-none focus:border-primary/50">
+            className="col-span-2 bg-surface-2 border border-surface-border rounded-lg px-2 py-0.5 text-xs text-text outline-hidden focus:border-primary/50">
             {sourceOptions.map((src) => <option key={src} value={src}>{src === 'all' ? t('files.all') : src}</option>)}
           </select>
           <span className="text-text-dim">{t('files.sort')}</span>
           <select value={sortKey} onChange={(e) => setSort(e.target.value, sortDir)}
-            className="bg-surface-2 border border-surface-border rounded-lg px-2 py-0.5 text-xs text-text outline-none focus:border-primary/50">
+            className="bg-surface-2 border border-surface-border rounded-lg px-2 py-0.5 text-xs text-text outline-hidden focus:border-primary/50">
             {['found', 'name', 'size', 'health', 'path'].map((k) => <option key={k} value={k}>{t('files.sort.' + k)}</option>)}
           </select>
-          <button onClick={() => setSort(sortKey, sortDir === 'asc' ? 'desc' : 'asc')} className="p-1 rounded text-text-dim hover:text-text">
+          <button onClick={() => setSort(sortKey, sortDir === 'asc' ? 'desc' : 'asc')} className="p-1 rounded-sm text-text-dim hover:text-text">
             {sortDir === 'asc' ? <ArrowDownAZ size={14} /> : <ArrowUpAZ size={14} />}
           </button>
         </div>
@@ -184,10 +184,10 @@ export default function FileList() {
                   className={clsx('flex items-center gap-2.5 px-3 cursor-pointer transition-colors border-b border-surface-border/30',
                     isSel ? 'bg-primary/10 border-l-2 border-l-primary' : 'hover:bg-surface-2/50')}>
                   <button onClick={(e) => { e.stopPropagation(); toggleSelect(f.id); setLastClicked(vr.index); }}
-                    className="flex-shrink-0 text-text-dim hover:text-primary transition-colors">
+                    className="shrink-0 text-text-dim hover:text-primary transition-colors">
                     {isChk ? <CheckCircle2 size={15} className="text-primary" /> : <Circle size={15} />}
                   </button>
-                  <Icon size={16} className={clsx('flex-shrink-0', TYPE_COLORS[f.type])} />
+                  <Icon size={16} className={clsx('shrink-0', TYPE_COLORS[f.type])} />
                   <div className="flex-1 min-w-0">
                     <div className="text-sm text-text truncate font-medium" title={f.path || f.name}>{f.name}</div>
                     <div className="flex items-center gap-1.5 text-xs text-text-dim mt-0.5 min-w-0">
@@ -196,13 +196,13 @@ export default function FileList() {
                       <span>·</span><span className="uppercase text-[10px] text-primary/80">{f.source || '?'}</span>
                       {f.dir ? <><span>·</span><span className="truncate" title={f.dir}>{f.dir}</span></> : null}
                       {rm > 0 && (
-                        <span className="flex items-center gap-0.5 ml-1 flex-shrink-0">
+                        <span className="flex items-center gap-0.5 ml-1 shrink-0">
                           {rm === 1 ? <Wrench size={11} className="text-yellow-400" /> : rm === 2 ? <AlertTriangle size={11} className="text-orange-400" /> : <RefreshCcw size={11} className="text-red-400" />}
                         </span>
                       )}
                     </div>
                   </div>
-                  <div className="flex-shrink-0 flex flex-col items-end gap-1">
+                  <div className="shrink-0 flex flex-col items-end gap-1">
                     <div className="flex items-center gap-1">
                       <span className="text-xs font-mono font-semibold" style={{ color: hColor(score) }}>{score}%</span>
                       <span className="text-[10px] text-text-dim">.{f.extension || '?'}</span>

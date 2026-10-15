@@ -1,6 +1,106 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
+
+@theme {
+  --color-bg-2: rgb(var(--c-bg-2));
+  --color-bg-3: rgb(var(--c-bg-3));
+  --color-bg: rgb(var(--c-bg));
+
+  --color-surface-2: rgb(var(--c-surface-2));
+  --color-surface: rgb(var(--c-surface));
+  --color-surface-border: rgb(var(--c-border));
+
+  --color-primary: rgb(var(--c-primary));
+  --color-primary-hover: rgb(var(--c-primary-hover));
+  --color-primary-glow: #6c63ff33;
+
+  --color-accent: rgb(var(--c-accent));
+  --color-accent-green: rgb(var(--c-green));
+  --color-accent-yellow: rgb(var(--c-yellow));
+
+  --color-text: rgb(var(--c-text));
+  --color-text-muted: rgb(var(--c-text-muted));
+  --color-text-dim: rgb(var(--c-text-dim));
+
+  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  --shadow-glow: 0 0 20px rgba(108, 99, 255, 0.3);
+  --shadow-glow-sm: 0 0 10px rgba(108, 99, 255, 0.2);
+  --shadow-panel: 0 4px 24px rgba(0, 0, 0, 0.5);
+
+  --animate-pulse-glow: pulseGlow 2s ease-in-out infinite;
+  --animate-scan-line: scanLine 2s linear infinite;
+  --animate-fade-in: fadeIn 0.3s ease-out;
+  --animate-slide-up: slideUp 0.3s ease-out;
+
+  @keyframes pulseGlow {
+    0%,
+    100% {
+      box-shadow: 0 0 10px rgba(108, 99, 255, 0.3);
+    }
+    50% {
+      box-shadow: 0 0 25px rgba(108, 99, 255, 0.6);
+    }
+  }
+  @keyframes scanLine {
+    0% {
+      transform: translateY(-100%);
+    }
+    100% {
+      transform: translateY(100vh);
+    }
+  }
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes slideUp {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+}
+
+@utility drag-region {
+  -webkit-app-region: drag;
+}
+
+@utility no-drag {
+  -webkit-app-region: no-drag;
+}
+
+@utility glass {
+  background: rgba(22, 22, 31, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
 
 @layer base {
   :root, :root.dark {
@@ -26,14 +126,4 @@
   ::-webkit-scrollbar-track  { @apply bg-transparent; }
   ::-webkit-scrollbar-thumb  { @apply bg-surface-border rounded-full; }
   ::-webkit-scrollbar-thumb:hover { @apply bg-text-dim; }
-}
-
-@layer utilities {
-  .drag-region { -webkit-app-region: drag; }
-  .no-drag     { -webkit-app-region: no-drag; }
-  .glass {
-    background: rgba(22, 22, 31, 0.85);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-  }
 }

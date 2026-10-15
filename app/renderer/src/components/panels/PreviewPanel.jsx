@@ -8,6 +8,7 @@ import clsx from 'clsx';
 import { useAppStore } from '../../stores/useAppStore';
 import { formatBytes } from '../../utils/formatters';
 import { useT } from '../../i18n';
+import RepairDialog from './RepairDialog';
 
 const lzr = window.lazarus;
 const hColor = (s) => (s >= 85 ? '#22c55e' : s >= 70 ? '#eab308' : s >= 50 ? '#f97316' : '#ef4444');
@@ -25,7 +26,6 @@ function b64ToBlobUrl(b64, mime) {
 export default function PreviewPanel() {
   const t = useT();
   const file = useAppStore((s) => s.selectedFile);
-  const aiAvailable = useAppStore((s) => s.aiAvailable);
   const repairResults = useAppStore((s) => s.repairResults);
   const setRepairResult = useAppStore((s) => s.setRepairResult);
   const addToast = useAppStore((s) => s.addToast);
@@ -35,7 +35,7 @@ export default function PreviewPanel() {
   const [preview, setPreview] = useState(null);
   const [loading, setLoading] = useState(false);
   const [mediaUrl, setMediaUrl] = useState(null);
-  const [repairing, setRepairing] = useState(false);
+  const [repairOpen, setRepairOpen] = useState(false);
   const token = useRef(0);
 
   const repair = file ? repairResults[file.id] : null;
@@ -63,26 +63,6 @@ export default function PreviewPanel() {
     setRecovery({ open: true, phase: 'choose', ids: [file.id], files: [], result: null, progress: null, blocked: null, dest: outputDir || '' });
   };
 
-  const doRepair = async (mode) => {
-    if (!file) return;
-    setRepairing(true);
-    let dir = outputDir;
-    if (!dir) dir = await lzr?.invoke('dialog:openFolder').catch(() => null);
-    if (!dir) { setRepairing(false); return; }
-    const chk = await lzr?.invoke('scan:check-dest', file.device, dir);
-    if (chk && chk.safe === false) {
-      setRepairing(false);
-      addToast(t('recover.warnText'), 'error', 9000);
-      return;
-    }
-    const r = await lzr?.invoke('scan:repair-file', { file, outputDir: dir, mode });
-    setRepairing(false);
-    if (r?.success) {
-      setRepairResult(file.id, r);
-      addToast(r.notes || (r.changed === false ? 'Aucune correction nécessaire' : 'Réparation terminée'), 'success', 6000);
-    } else addToast(r?.message || 'Réparation impossible', 'error', 8000);
-  };
-
   if (!file) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center bg-bg gap-4 text-text-dim">
@@ -99,7 +79,7 @@ export default function PreviewPanel() {
 
   return (
     <div className="flex flex-col flex-1 min-w-0 bg-bg overflow-hidden">
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-surface-border bg-bg-2 flex-shrink-0">
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-surface-border bg-bg-2 shrink-0">
         <div className="flex-1 min-w-0">
           <h3 className="text-sm font-semibold text-text truncate" title={file.path}>{file.name}</h3>
           <div className="flex items-center gap-2 text-xs text-text-dim mt-0.5">
@@ -124,12 +104,12 @@ export default function PreviewPanel() {
         </div>
       </div>
 
-      <HealthPanel health={health} score={score} rm={rm} repaired={repaired} onRepair={doRepair} busy={repairing} aiAvailable={aiAvailable} file={file} />
+      <HealthPanel health={health} score={score} rm={rm} repaired={repaired} onRepair={() => setRepairOpen(true)} file={file} />
 
       <AnimatePresence>
         {repair && (
           <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }}
-            className={clsx('flex items-center gap-2 px-4 py-1.5 text-xs flex-shrink-0 border-b',
+            className={clsx('flex items-center gap-2 px-4 py-1.5 text-xs shrink-0 border-b',
               repair.success ? 'bg-accent-green/10 border-accent-green/20 text-accent-green' : 'bg-accent/10 border-accent/20 text-accent')}>
             {repair.success ? <CheckCircle2 size={13} /> : <AlertCircle size={13} />}
             <span className="truncate">{repair.notes || repair.message}</span>
@@ -138,10 +118,10 @@ export default function PreviewPanel() {
       </AnimatePresence>
 
       <div className="flex-1 overflow-auto flex items-center justify-center bg-[#080810] p-4">
-        <PreviewBody file={file} preview={preview} loading={loading} zoom={zoom} mediaUrl={mediaUrl} repairedB64={repair?.image_b64} />
+        <PreviewBody file={file} preview={preview} loading={loading} zoom={zoom} mediaUrl={mediaUrl} repairedB64={repair?.preview_b64} repairedMime={repair?.previewMime} />
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 px-4 py-2 border-t border-surface-border bg-bg-2 flex-shrink-0 text-[11px] text-text-dim font-mono">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 px-4 py-2 border-t border-surface-border bg-bg-2 shrink-0 text-[11px] text-text-dim font-mono">
         <span>ID {file.id}</span>
         <span>{file.source?.toUpperCase()}{file.mft_ref != null && file.source === 'ntfs' ? ` · MFT ${file.mft_ref}` : ''}{file.inode ? ` · inode ${file.inode}` : ''}</span>
         <span>{t('status.' + (file.status ?? 0))}</span>
@@ -151,11 +131,15 @@ export default function PreviewPanel() {
         {file.encrypted && <span className="text-red-400">EFS chiffré</span>}
         {file.path && <span className="truncate max-w-full" title={file.path}>{file.path}</span>}
       </div>
+      {repairOpen && (
+        <RepairDialog file={file} originalSrc={file.type === 1 && preview?.success && MIME[(file.extension || '').toLowerCase()] ? `data:${MIME[(file.extension || '').toLowerCase()]};base64,${preview.head_b64}` : null}
+          onClose={() => setRepairOpen(false)} />
+      )}
     </div>
   );
 }
 
-function PreviewBody({ file, preview, loading, zoom, mediaUrl, repairedB64 }) {
+function PreviewBody({ file, preview, loading, zoom, mediaUrl, repairedB64, repairedMime }) {
   const t = useT();
   if (loading && !preview) {
     return <div className="flex flex-col items-center gap-3 text-text-dim"><Sparkles size={30} className="animate-spin text-primary opacity-60" /><p className="text-xs">{t('preview.loading')}</p></div>;
@@ -165,7 +149,7 @@ function PreviewBody({ file, preview, loading, zoom, mediaUrl, repairedB64 }) {
   }
   const ext = (file.extension || '').toLowerCase();
   if (file.type === 1 && MIME[ext]) {
-    const src = repairedB64 ? `data:image/jpeg;base64,${repairedB64}` : `data:${MIME[ext]};base64,${preview.head_b64}`;
+    const src = repairedB64 ? `data:${repairedMime || 'image/jpeg'};base64,${repairedB64}` : `data:${MIME[ext]};base64,${preview.head_b64}`;
     return <ImageView src={src} zoom={zoom} fallback={<HexView preview={preview} />} />;
   }
   if (file.type === 2 && mediaUrl) return <video src={mediaUrl} controls className="max-w-full max-h-full rounded-lg shadow-panel" />;
@@ -174,7 +158,7 @@ function PreviewBody({ file, preview, loading, zoom, mediaUrl, repairedB64 }) {
     const bin = atob(preview.head_b64);
     let txt = '';
     try { txt = decodeURIComponent(escape(bin)); } catch { txt = bin; }
-    return <pre className="w-full h-full overflow-auto text-xs font-mono text-text-muted p-4 whitespace-pre-wrap break-words select-text">{txt}</pre>;
+    return <pre className="w-full h-full overflow-auto text-xs font-mono text-text-muted p-4 whitespace-pre-wrap wrap-break-word select-text">{txt}</pre>;
   }
   return <HexView preview={preview} />;
 }
@@ -205,7 +189,7 @@ function HexView({ preview }) {
   }, [preview.head_b64]);
   return (
     <div className="flex flex-col w-full h-full overflow-hidden">
-      <div className="flex items-center gap-2 px-4 py-1.5 border-b border-surface-border bg-surface-2 text-xs text-text-dim flex-shrink-0">
+      <div className="flex items-center gap-2 px-4 py-1.5 border-b border-surface-border bg-surface-2 text-xs text-text-dim shrink-0">
         <HardDrive size={11} /><span>{t('preview.hex')}</span><span>·</span>
         <span className="font-mono">{formatBytes(preview.bytes)} / {formatBytes(preview.size)}</span>
       </div>
@@ -225,7 +209,7 @@ function Placeholder({ file, message }) {
   );
 }
 
-function HealthPanel({ health, score, rm, repaired, onRepair, busy, aiAvailable, file }) {
+function HealthPanel({ health, score, rm, repaired, onRepair, file }) {
   const t = useT();
   const [open, setOpen] = useState(true);
   const rmLabel = [t('preview.excellent'), t('preview.repair'), t('preview.repair'), t('preview.rebuild')][rm] || '';
@@ -233,7 +217,7 @@ function HealthPanel({ health, score, rm, repaired, onRepair, busy, aiAvailable,
   const RmIcon = rm === 0 ? ShieldCheck : rm === 1 ? Wrench : rm === 2 ? AlertTriangle : RefreshCcw;
   const ow = file.overwritten_pct;
   return (
-    <div className="flex-shrink-0 border-b border-surface-border bg-bg-2">
+    <div className="shrink-0 border-b border-surface-border bg-bg-2">
       <button onClick={() => setOpen((o) => !o)} className="w-full flex items-center gap-2 px-4 py-2 text-xs font-medium text-text-dim hover:text-text transition-colors">
         <Activity size={12} className="text-primary" /><span>{t('preview.health')}</span>
         <div className="ml-auto flex items-center gap-2">
@@ -259,13 +243,9 @@ function HealthPanel({ health, score, rm, repaired, onRepair, busy, aiAvailable,
             <IntBar label="Données" value={health.dataPct ?? score} />
           </div>
           <div className="col-span-2 flex flex-wrap gap-2 pt-1">
-            {repaired ? <span className="flex items-center gap-1.5 text-xs text-accent-green"><CheckCircle2 size={13} /> Fichier réparé</span> : (
-              <>
-                {rm >= 1 && <ActionBtn onClick={() => onRepair('minor')} busy={busy} icon={<Wrench size={12} />} label={t('preview.repair')} color="yellow" />}
-                {file.type === 1 && aiAvailable && <ActionBtn onClick={() => onRepair('major')} busy={busy} icon={<Wand2 size={12} />} label={t('preview.repairAI')} color="purple" />}
-                {rm === 0 && <span className="flex items-center gap-1.5 text-xs text-accent-green"><ShieldCheck size={13} /> {t('preview.excellent')}</span>}
-              </>
-            )}
+            {repaired && <span className="flex items-center gap-1.5 text-xs text-accent-green"><CheckCircle2 size={13} /> Fichier réparé</span>}
+            <ActionBtn onClick={onRepair} icon={<Wand2 size={12} />} label={t('preview.repairAI')} color={rm >= 1 ? 'purple' : 'yellow'} />
+            {rm === 0 && !repaired && <span className="flex items-center gap-1.5 text-xs text-accent-green"><ShieldCheck size={13} /> {t('preview.excellent')}</span>}
           </div>
         </div>
       )}
@@ -295,11 +275,11 @@ function IntBar({ label, value }) {
   );
 }
 
-function ActionBtn({ onClick, busy, icon, label, color }) {
+function ActionBtn({ onClick, icon, label, color }) {
   const cls = color === 'yellow' ? 'bg-yellow-500/20 text-yellow-300 hover:bg-yellow-500/30 border-yellow-500/30' : 'bg-purple-500/20 text-purple-300 hover:bg-purple-500/30 border-purple-500/30';
   return (
-    <button onClick={onClick} disabled={busy} className={clsx('flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-all', busy ? 'opacity-50 cursor-wait' : cls)}>
-      {busy ? <Sparkles size={11} className="animate-spin" /> : icon}{label}
+    <button onClick={onClick} className={clsx('flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-all', cls)}>
+      {icon}{label}
     </button>
   );
 }

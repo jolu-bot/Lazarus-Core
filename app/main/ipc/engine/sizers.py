@@ -76,7 +76,7 @@ def jpeg(io, off, cap) -> Result:
             pos += 2 + ln
             while pos - off < cap:
                 chunk = io.read(pos, 65536)
-                if not chunk:
+                if len(chunk) < 2:                 # fin des données (évite une boucle infinie sur un dernier octet isolé)
                     return (UNKNOWN, 'jpg')
                 mm = _JPEG_MARK.search(chunk)
                 if mm:

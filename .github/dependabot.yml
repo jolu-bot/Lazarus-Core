@@ -1,12 +1,29 @@
 version: 2
 updates:
   - package-ecosystem: "npm"
+    directory: "/"
+    schedule: { interval: "weekly" }
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
     directory: "/app"
-    schedule:
-      interval: "weekly"
+    schedule: { interval: "weekly" }
     open-pull-requests-limit: 10
   - package-ecosystem: "npm"
-    directory: "/"
-    schedule:
-      interval: "weekly"
+    directory: "/app/renderer"
+    schedule: { interval: "weekly" }
+    open-pull-requests-limit: 10
+  - package-ecosystem: "npm"
+    directory: "/server"
+    schedule: { interval: "weekly" }
     open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/tests"
+    schedule: { interval: "weekly" }
+    open-pull-requests-limit: 5
+  - package-ecosystem: "pip"
+    directory: "/app/main/ipc"
+    schedule: { interval: "weekly" }
+    open-pull-requests-limit: 5
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule: { interval: "weekly" }

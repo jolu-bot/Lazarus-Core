@@ -11,8 +11,6 @@ const store = new Store();
 const { setupLicenseIPC } = require('./ipc/license');
 const { setupScanIPC, setupDriveWatcher, stopEverything } = require('./ipc/scan');
 const { setupPaymentIPC } = require('./ipc/payment');
-const { setupAIIPC } = require('./ipc/ai');
-const { startAIServer, stopAIServer } = require('./ai_process');
 
 const isDev = process.env.NODE_ENV === 'development' || process.argv.includes('--dev');
 const RENDERER_URL = isDev ? 'http://localhost:3000' : null;
@@ -149,13 +147,6 @@ app.whenReady().then(async () => {
   setupScanIPC(ipcMain);
   setupDriveWatcher(mainWindow);
   setupPaymentIPC(ipcMain, store);
-  setupAIIPC(ipcMain);
-
-  try {
-    await startAIServer();
-  } catch (e) {
-    console.warn('AI server not started:', e.message);
-  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -168,7 +159,6 @@ app.on('before-quit', () => {
 });
 
 app.on('window-all-closed', () => {
-  stopAIServer();
   if (process.platform !== 'darwin') app.quit();
 });
 

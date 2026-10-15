@@ -22,7 +22,6 @@ const FREE_LOCAL_LICENSE = {
   freeMode: true,
 };
 
-const HMAC_SECRET = process.env.LAZARUS_LICENSE_SECRET || 'lzr_hmac_v1_change_in_prod';
 
 function setupLicenseIPC(ipcMain, store) {
   ipcMain.handle('license:get', async () => {

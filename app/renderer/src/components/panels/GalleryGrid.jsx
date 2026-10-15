@@ -76,7 +76,7 @@ export default function GalleryGrid() {
                     className={clsx('absolute top-1 left-1 rounded-full bg-black/50', chk ? 'text-primary' : 'text-white/70 opacity-0 group-hover:opacity-100')}>
                     {chk ? <CheckCircle2 size={16} /> : <Circle size={16} />}
                   </button>
-                  <div className="absolute bottom-0 inset-x-0 px-1 py-0.5 text-[9px] text-white bg-gradient-to-t from-black/70 to-transparent truncate">{f.name}</div>
+                  <div className="absolute bottom-0 inset-x-0 px-1 py-0.5 text-[9px] text-white bg-linear-to-t from-black/70 to-transparent truncate">{f.name}</div>
                 </div>
               );
             })}

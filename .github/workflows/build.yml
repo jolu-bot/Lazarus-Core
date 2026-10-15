@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build-windows:
-    name: Windows NSIS Installer
+    name: Windows (installateur + portable)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,13 +36,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: npx electron-builder --win nsis --publish always
+        run: npx electron-builder --win nsis portable --publish always
         working-directory: app
       - name: Artefact Windows
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer
-          path: app/dist-build/*.exe
+          path: |
+            app/dist-build/*Setup*.exe
+            app/dist-build/*Portable*.exe
 
   build-macos:
     name: macOS DMG
