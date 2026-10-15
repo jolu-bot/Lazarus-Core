@@ -24,7 +24,7 @@
     "axios": "^1.7.2",
     "electron-store": "^8.2.0",
     "electron-updater": "^6.1.8",
-    "node-addon-api": "^8.1.0",
+    "node-addon-api": "^8.9.2",
     "node-machine-id": "^1.1.12",
     "stripe": "^15.12.0"
   },
