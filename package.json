@@ -18,6 +18,6 @@
     "clean": "node scripts/clean.js"
   },
   "dependencies": {
-    "node-addon-api": "^8.7.0"
+    "node-addon-api": "^8.9.2"
   }
 }
