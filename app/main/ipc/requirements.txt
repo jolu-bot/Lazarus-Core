@@ -1,4 +1,4 @@
 # Dépendances du moteur de récupération (tout le reste est la bibliothèque standard de Python)
-cryptography>=42                 # déverrouillage BitLocker (AES-XTS / AES-CCM) ; optionnel hors BitLocker
+cryptography>=50.0.2                 # déverrouillage BitLocker (AES-XTS / AES-CCM) ; optionnel hors BitLocker
 numpy>=1.26                      # réparation d'images, miniatures
 opencv-python-headless>=4.9      # reconstruction d'images (inpainting), débruitage ; version « headless » : pas d'interface graphique
